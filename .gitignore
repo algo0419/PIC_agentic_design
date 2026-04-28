@@ -1,0 +1,4 @@
+.env
+.codex_home/
+data/
+smoke_test.txt
