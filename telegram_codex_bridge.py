@@ -71,8 +71,13 @@ def bridge_help_text() -> str:
             "/mode width=500 height=220 wavelength=1550",
             "/mode width=700 height=220 slab=90 wavelength=1550",
             "/sweep start=400 stop=700 step=25 height=220 wavelength=1550",
+            "/dc width=500 height=220 gap=200 coupling_length=20",
+            "/dc_sweep parameter=gap start=100 stop=300 step=50 width=500 height=220",
+            "/fdtd_test width=500 height=220 length=2",
             "/photonics_status",
             "기본적인 etch depth 220nm, sidewall angle 90도인 SOI waveguide의 mode profile 그려줘",
+            "50대 50 directional coupler 기본 설계하고 GDS랑 시뮬레이션 파일 보내줘",
+            "아주 간단한 FDTD 테스트 프로젝트 만들어줘",
             "",
             "일반 자연어 요청도 가능하지만, Lumerical 작업은 위 명령 형식이 가장 안정적입니다.",
         ]
@@ -95,6 +100,14 @@ def looks_like_photonics_request(text: str) -> bool:
         "rib",
         "strip",
         "sweep",
+        "directional coupler",
+        "coupler",
+        "50:50",
+        "50대 50",
+        "coupling length",
+        "gds",
+        "fdtd",
+        "fsp",
         "파장",
         "모드",
         "웨이브가이드",
@@ -102,6 +115,9 @@ def looks_like_photonics_request(text: str) -> bool:
         "식각",
         "사이드월",
         "슬랩",
+        "커플러",
+        "커플링",
+        "결합기",
         "실리콘 포토닉스",
         "광도파로",
     ]
@@ -229,6 +245,7 @@ class TaskRunner:
         self.approval_policy = approval_policy
         self.python_cmd = sys.executable
         self.tasks: queue.Queue[dict] = queue.Queue()
+        self.pending_confirmations: dict[str, dict] = {}
         self.worker = threading.Thread(target=self._worker_loop, daemon=True)
 
     def start(self) -> None:
@@ -244,6 +261,9 @@ class TaskRunner:
         attachments = self._collect_attachments(message)
         if not text and not attachments:
             self.telegram.send_message(chat_id, "텍스트나 첨부 파일을 함께 보내주시면 처리할게요.")
+            return
+
+        if self._handle_pending_confirmation(chat_id, text):
             return
 
         if text == "/start":
@@ -280,9 +300,135 @@ class TaskRunner:
             "cli_args": cli_args,
         }
 
-        task_file = TASKS_DIR / f"{task_id}.json"
+        confirmation = self._confirmation_for_task(task)
+        if confirmation is not None:
+            self.pending_confirmations[chat_id] = {
+                "task": task,
+                "created_at": time.time(),
+                "message": confirmation,
+            }
+            self.telegram.send_message(chat_id, confirmation)
+            return
+
+        self._persist_and_queue(task)
+
+    def _persist_and_queue(self, task: dict) -> None:
+        task_file = TASKS_DIR / f"{task['task_id']}.json"
         task_file.write_text(json.dumps(task, ensure_ascii=False, indent=2), encoding="utf-8")
         self.tasks.put(task)
+
+    def _handle_pending_confirmation(self, chat_id: str, text: str) -> bool:
+        normalized = text.strip().lower()
+        if not normalized:
+            return False
+
+        yes_values = {"yes", "y", "ok", "okay", "go", "run", "execute", "네", "예", "응", "ㅇ", "ㅇㅇ", "좋아", "진행", "실행", "해", "해줘"}
+        no_values = {"no", "n", "cancel", "stop", "아니", "아니오", "ㄴ", "취소", "중단", "멈춰"}
+
+        pending = self.pending_confirmations.get(chat_id)
+        if normalized not in yes_values and normalized not in no_values:
+            return False
+
+        if pending is None:
+            self.telegram.send_message(chat_id, "대기 중인 확인 요청이 없습니다.")
+            return True
+
+        self.pending_confirmations.pop(chat_id, None)
+        if normalized in no_values:
+            self.telegram.send_message(chat_id, "취소했습니다. 조건을 바꿔서 다시 보내주시면 됩니다.")
+            return True
+
+        task = pending["task"]
+        self._persist_and_queue(task)
+        self.telegram.send_message(chat_id, "확인했습니다. 이제 실행하겠습니다.")
+        return True
+
+    def _confirmation_for_task(self, task: dict) -> str | None:
+        reasons: list[str] = []
+        text = task.get("text", "")
+        route = task.get("route", "")
+        cli_args = task.get("cli_args", [])
+
+        if self._is_fdtd_task(route, cli_args, text):
+            reasons.append(
+                "FDTD 계열 작업은 상대적으로 무겁습니다. 이 테스트는 time-domain run 없이 project 생성/저장만 수행하고, ETA는 보통 1~2분입니다."
+            )
+
+        assumption_lines = self._assumption_lines_for_task(task)
+        if assumption_lines:
+            reasons.append("요청에 빠진 값이 있어 아래 기본값/추론을 적용하려고 합니다.\n" + "\n".join(f"- {line}" for line in assumption_lines))
+
+        if not reasons:
+            return None
+
+        return "\n\n".join(
+            [
+                *reasons,
+                "이 조건으로 실행할까요? 실행하려면 `yes` 또는 `ㅇㅇ`, 취소하려면 `no`라고 보내주세요.",
+            ]
+        )
+
+    def _is_fdtd_task(self, route: str, cli_args: list[str], text: str) -> bool:
+        if route == "photonics_fdtd_test":
+            return "--script-only" not in cli_args
+        lowered = text.lower()
+        return route == "photonics_nl" and ("fdtd" in lowered or "fsp" in lowered)
+
+    def _assumption_lines_for_task(self, task: dict) -> list[str]:
+        route = task.get("route", "")
+        text = task.get("text", "")
+        if route == "photonics_nl":
+            try:
+                from photonics_agent import parse_natural_language_request
+
+                parsed = parse_natural_language_request(text)
+            except Exception:
+                return []
+            return [str(item) for item in parsed.assumptions]
+
+        if route == "photonics_dc":
+            return self._structured_default_assumptions(
+                text,
+                {
+                    "width": "waveguide width 500 nm",
+                    "height": "SOI/device layer height 220 nm",
+                    "gap": "directional coupler gap 200 nm",
+                    "coupling_length": "initial coupling length 20 um",
+                },
+            )
+
+        if route == "photonics_fdtd_test":
+            return self._structured_default_assumptions(
+                text,
+                {
+                    "width": "waveguide width 500 nm",
+                    "height": "SOI/device layer height 220 nm",
+                    "length": "FDTD test waveguide length 2 um",
+                    "wavelength": "wavelength 1550 nm",
+                },
+            )
+
+        return []
+
+    def _structured_default_assumptions(self, text: str, defaults: dict[str, str]) -> list[str]:
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            return []
+        keys = {token.split("=", 1)[0].strip().lower() for token in tokens[1:] if "=" in token}
+        aliases = {
+            "width": {"width", "width_nm", "wg_width"},
+            "height": {"height", "height_nm", "wg_thickness", "thickness"},
+            "gap": {"gap", "gap_nm", "spacing", "separation"},
+            "coupling_length": {"coupling_length", "coupling_length_um", "length", "lc"},
+            "length": {"length", "length_um", "wg_length"},
+            "wavelength": {"wavelength", "wavelength_nm", "lambda"},
+        }
+        lines: list[str] = []
+        for key, description in defaults.items():
+            if keys.isdisjoint(aliases.get(key, {key})):
+                lines.append(description)
+        return lines
 
     def _collect_attachments(self, message: dict) -> list[dict]:
         attachments: list[dict] = []
@@ -438,13 +584,13 @@ class TaskRunner:
             return
 
         payload = json.loads(stdout.strip() or "{}")
-        for attachment in payload.get("attachments", []):
+        self._safe_send(chat_id, str(payload.get("message", "포토닉 작업을 완료했습니다."))[:3000])
+        for attachment in payload.get("telegram_attachments", payload.get("attachments", [])):
             attachment_path = Path(attachment)
             if not attachment_path.is_absolute():
                 attachment_path = (self.workdir / attachment_path).resolve()
             if attachment_path.exists() and attachment_path.is_file():
                 self._safe_send_document(chat_id, attachment_path)
-        self._safe_send(chat_id, str(payload.get("message", "포토닉 작업을 완료했습니다."))[:3000])
 
     def _download_attachments(self, task: dict) -> list[Path]:
         downloaded: list[Path] = []
@@ -501,6 +647,12 @@ class TaskRunner:
             return "photonics_mode", self._mode_cli_args(params)
         if command == "/sweep":
             return "photonics_sweep", self._sweep_cli_args(params)
+        if command == "/dc":
+            return "photonics_dc", self._dc_cli_args(params)
+        if command == "/dc_sweep":
+            return "photonics_dc_sweep", self._dc_sweep_cli_args(params)
+        if command == "/fdtd_test":
+            return "photonics_fdtd_test", self._fdtd_test_cli_args(params)
 
         raise ConfigError("지원하지 않는 명령입니다.\n\n" + bridge_help_text())
 
@@ -641,6 +793,150 @@ class TaskRunner:
         self._reject_unknown_params(params)
         return args
 
+    def _dc_base_cli_args(self, params: dict[str, str]) -> list[str]:
+        height_value = self._take_param(params, "height", "height_nm", "wg_thickness", "thickness", default="220")
+        args = [
+            "--width-nm",
+            self._take_param(params, "width", "width_nm", "wg_width", default="500"),
+            "--height-nm",
+            height_value,
+            "--wavelength-nm",
+            self._take_param(params, "wavelength", "wavelength_nm", "lambda", default="1550"),
+            "--gap-nm",
+            self._take_param(params, "gap", "gap_nm", "spacing", "separation", default="200"),
+            "--coupling-length-um",
+            self._take_param(params, "coupling_length", "coupling_length_um", "length", "lc", default="20"),
+        ]
+
+        input_length = self._take_param(params, "input_length", "input_length_um")
+        if input_length is not None:
+            args.extend(["--input-length-um", input_length])
+        output_length = self._take_param(params, "output_length", "output_length_um")
+        if output_length is not None:
+            args.extend(["--output-length-um", output_length])
+        target_split = self._take_param(params, "target_split", "target_split_ratio", "split")
+        if target_split is not None:
+            if ":" in target_split:
+                first, second = target_split.split(":", 1)
+                try:
+                    ratio = float(second) / (float(first) + float(second))
+                except ValueError as exc:
+                    raise ConfigError(f"split 값을 해석하지 못했습니다: {exc}") from exc
+                args.extend(["--target-split-ratio", str(ratio)])
+            else:
+                args.extend(["--target-split-ratio", target_split])
+
+        slab = self._take_param(params, "slab", "slab_nm")
+        etch = self._take_param(params, "etch", "etch_depth", "etch_depth_nm")
+        if slab is None and etch is not None:
+            try:
+                slab_value = float(height_value) - float(etch)
+            except ValueError as exc:
+                raise ConfigError(f"etch/slab 값을 숫자로 해석하지 못했습니다: {exc}") from exc
+            slab = str(slab_value)
+        if slab is not None:
+            args.extend(["--slab-nm", slab])
+        sidewall = self._take_param(params, "sidewall", "sidewall_angle", "sidewall_angle_deg", "angle")
+        if sidewall is not None:
+            args.extend(["--sidewall-angle-deg", sidewall])
+        core_material = self._take_param(params, "core_material", "core")
+        if core_material is not None:
+            args.extend(["--core-material", core_material])
+        clad_material = self._take_param(params, "clad_material", "clad")
+        if clad_material is not None:
+            args.extend(["--clad-material", clad_material])
+        trial_modes = self._take_param(params, "trial_modes")
+        if trial_modes is not None:
+            args.extend(["--trial-modes", trial_modes])
+        mesh_accuracy = self._take_param(params, "mesh_accuracy")
+        if mesh_accuracy is not None:
+            args.extend(["--mesh-accuracy", mesh_accuracy])
+        lumapi_dir = self._take_param(params, "lumapi_dir")
+        if lumapi_dir is not None:
+            args.extend(["--lumapi-dir", lumapi_dir])
+        if parse_bool(self._take_param(params, "show_gui", default="false")):
+            args.append("--show-gui")
+        return args
+
+    def _dc_cli_args(self, params: dict[str, str]) -> list[str]:
+        args = ["dc", *self._dc_base_cli_args(params)]
+        timeout_s = self._take_param(params, "timeout", "timeout_s")
+        if timeout_s is not None:
+            args.extend(["--timeout-s", timeout_s])
+        if not parse_bool(self._take_param(params, "live", default="true")):
+            args.append("--script-only")
+        self._reject_unknown_params(params)
+        return args
+
+    def _dc_sweep_cli_args(self, params: dict[str, str]) -> list[str]:
+        parameter = self._take_param(params, "parameter", "param", "sweep")
+        if parameter is None:
+            raise ConfigError("/dc_sweep에는 parameter=gap 또는 parameter=length가 필요합니다.")
+        normalized = parameter.strip().lower()
+        if normalized in {"gap", "gap_nm", "spacing", "separation"}:
+            parameter = "gap_nm"
+        elif normalized in {"length", "coupling_length", "coupling_length_um", "lc"}:
+            parameter = "coupling_length_um"
+        else:
+            raise ConfigError("parameter는 gap 또는 length 중 하나여야 합니다.")
+
+        args = [
+            "dc_sweep",
+            *self._dc_base_cli_args(params),
+            "--parameter",
+            parameter,
+            "--start",
+            self._required_param(params, "start", "from"),
+            "--stop",
+            self._required_param(params, "stop", "to"),
+            "--step",
+            self._required_param(params, "step"),
+        ]
+        timeout_s = self._take_param(params, "timeout", "timeout_s")
+        if timeout_s is not None:
+            args.extend(["--timeout-s", timeout_s])
+        if not parse_bool(self._take_param(params, "live", default="true")):
+            args.append("--script-only")
+        self._reject_unknown_params(params)
+        return args
+
+    def _fdtd_test_cli_args(self, params: dict[str, str]) -> list[str]:
+        args = [
+            "fdtd_test",
+            "--width-nm",
+            self._take_param(params, "width", "width_nm", "wg_width", default="500"),
+            "--height-nm",
+            self._take_param(params, "height", "height_nm", "wg_thickness", "thickness", default="220"),
+            "--length-um",
+            self._take_param(params, "length", "length_um", "wg_length", default="2"),
+            "--wavelength-nm",
+            self._take_param(params, "wavelength", "wavelength_nm", "lambda", default="1550"),
+        ]
+        mesh_accuracy = self._take_param(params, "mesh_accuracy")
+        if mesh_accuracy is not None:
+            args.extend(["--mesh-accuracy", mesh_accuracy])
+        simulation_time = self._take_param(params, "simulation_time", "simulation_time_fs")
+        if simulation_time is not None:
+            args.extend(["--simulation-time-fs", simulation_time])
+        core_material = self._take_param(params, "core_material", "core")
+        if core_material is not None:
+            args.extend(["--core-material", core_material])
+        clad_material = self._take_param(params, "clad_material", "clad")
+        if clad_material is not None:
+            args.extend(["--clad-material", clad_material])
+        timeout_s = self._take_param(params, "timeout", "timeout_s")
+        if timeout_s is not None:
+            args.extend(["--timeout-s", timeout_s])
+        lumapi_dir = self._take_param(params, "lumapi_dir")
+        if lumapi_dir is not None:
+            args.extend(["--lumapi-dir", lumapi_dir])
+        if parse_bool(self._take_param(params, "show_gui", default="false")):
+            args.append("--show-gui")
+        if not parse_bool(self._take_param(params, "live", default="true")):
+            args.append("--script-only")
+        self._reject_unknown_params(params)
+        return args
+
     def _build_prompt(self, task: dict) -> str:
         attachment_paths = self._task_attachment_paths(task)
         attachment_lines = [f"- {path}" for path in attachment_paths] or ["- none"]
@@ -659,7 +955,7 @@ class TaskRunner:
                 "If a live Lumerical solve fails, still leave behind reproducible Python or LSF files and explain what is ready.",
                 f"Current workspace: {self.workdir}",
                 "If you create or modify files, do so in this workspace.",
-                "Useful local helper commands include `python photonics_agent.py env`, `python photonics_agent.py mode`, and `python photonics_agent.py sweep`.",
+                "Useful local helper commands include `python photonics_agent.py env`, `python photonics_agent.py mode`, `python photonics_agent.py sweep`, `python photonics_agent.py dc`, `python photonics_agent.py dc_sweep`, and `python photonics_agent.py fdtd_test`.",
                 "After finishing, reply like a compact engineering assistant.",
                 "Keep the reply short and natural.",
                 "Do not use sections or bullet lists unless truly needed.",
