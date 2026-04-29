@@ -35,6 +35,14 @@ DEFAULT_DC_GAP_SWEEP_STEP_NM = float(os.environ.get("PHOTONICS_DEFAULT_DC_GAP_SW
 DEFAULT_DC_LENGTH_SWEEP_START_UM = float(os.environ.get("PHOTONICS_DEFAULT_DC_LENGTH_SWEEP_START_UM", "5"))
 DEFAULT_DC_LENGTH_SWEEP_STOP_UM = float(os.environ.get("PHOTONICS_DEFAULT_DC_LENGTH_SWEEP_STOP_UM", "60"))
 DEFAULT_DC_LENGTH_SWEEP_STEP_UM = float(os.environ.get("PHOTONICS_DEFAULT_DC_LENGTH_SWEEP_STEP_UM", "5"))
+DEFAULT_SIN_MATERIAL = os.environ.get("PHOTONICS_SIN_MATERIAL", "Si3N4 (Silicon Nitride) - Luke")
+DEFAULT_MMI_ROUTING_WIDTH_NM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_ROUTING_WIDTH_NM", "1500"))
+DEFAULT_MMI_SIN_HEIGHT_NM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_SIN_HEIGHT_NM", "400"))
+DEFAULT_MMI_BODY_WIDTH_UM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_BODY_WIDTH_UM", "6"))
+DEFAULT_MMI_BODY_LENGTH_UM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_BODY_LENGTH_UM", "60"))
+DEFAULT_MMI_TAPER_LENGTH_UM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_TAPER_LENGTH_UM", "15"))
+DEFAULT_MMI_ACCESS_LENGTH_UM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_ACCESS_LENGTH_UM", "10"))
+DEFAULT_MMI_PORT_PITCH_UM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_PORT_PITCH_UM", "2"))
 LUMERICAL_PROJECT_SUFFIXES = {".lms", ".fsp", ".ldev", ".icp"}
 TELEGRAM_ATTACHMENT_SUFFIXES = {".png", ".jpg", ".jpeg", ".gds", *LUMERICAL_PROJECT_SUFFIXES}
 
@@ -433,55 +441,79 @@ class DirectionalCouplerSweepSpec:
 
 
 @dataclass
-class FdtdTestSpec:
-    width_nm: float = DEFAULT_MODE_WIDTH_NM
+class MmiSpec:
+    ports_in: int = 2
+    ports_out: int = 2
+    routing_width_nm: float = DEFAULT_MMI_ROUTING_WIDTH_NM
     height_nm: float = DEFAULT_DEVICE_LAYER_NM
-    length_um: float = 2.0
     wavelength_nm: float = DEFAULT_WAVELENGTH_NM
+    body_width_um: float = DEFAULT_MMI_BODY_WIDTH_UM
+    body_length_um: float = DEFAULT_MMI_BODY_LENGTH_UM
+    taper_length_um: float = DEFAULT_MMI_TAPER_LENGTH_UM
+    access_length_um: float = DEFAULT_MMI_ACCESS_LENGTH_UM
+    port_pitch_um: float = DEFAULT_MMI_PORT_PITCH_UM
+    aperture_width_nm: float | None = None
     core_material: str = "Si (Silicon) - Palik"
     clad_material: str = "SiO2 (Glass) - Palik"
-    mesh_accuracy: int = 1
-    simulation_time_fs: float = 50.0
+    sidewall_angle_deg: float = 90.0
+    mesh_accuracy: int = 3
     hide: bool = DEFAULT_HIDE
     lumapi_dir: str | None = None
+    simulation_method: str = "eme"
 
     def validate(self) -> None:
-        if self.width_nm <= 0:
-            raise ValueError("width_nm must be positive.")
+        if self.ports_in < 1 or self.ports_out < 1:
+            raise ValueError("MMI port counts must be at least 1.")
+        if self.ports_in > 16 or self.ports_out > 16:
+            raise ValueError("MMI port counts above 16 are not supported by the built-in layout generator.")
+        if self.routing_width_nm <= 0:
+            raise ValueError("routing_width_nm must be positive.")
         if self.height_nm <= 0:
             raise ValueError("height_nm must be positive.")
-        if self.length_um <= 0:
-            raise ValueError("length_um must be positive.")
         if self.wavelength_nm <= 0:
             raise ValueError("wavelength_nm must be positive.")
-        if self.mesh_accuracy < 1:
-            raise ValueError("mesh_accuracy must be at least 1.")
-        if self.simulation_time_fs <= 0:
-            raise ValueError("simulation_time_fs must be positive.")
+        if self.body_width_um <= 0 or self.body_length_um <= 0:
+            raise ValueError("MMI body width/length must be positive.")
+        if self.taper_length_um < 0 or self.access_length_um < 0:
+            raise ValueError("MMI taper/access lengths cannot be negative.")
+        if self.port_pitch_um <= 0:
+            raise ValueError("port_pitch_um must be positive.")
+        max_ports = max(self.ports_in, self.ports_out)
+        occupied_width_um = (max_ports - 1) * self.port_pitch_um + self.routing_width_um / 1000.0
+        if occupied_width_um >= self.body_width_um:
+            raise ValueError("MMI body_width_um is too small for the requested port pitch and routing waveguide width.")
+        if self.aperture_width_nm is not None and self.aperture_width_nm <= 0:
+            raise ValueError("aperture_width_nm must be positive when provided.")
+        if not (45.0 <= self.sidewall_angle_deg <= 90.0):
+            raise ValueError("sidewall_angle_deg must be between 45 and 90 degrees.")
 
     @property
-    def width_m(self) -> float:
-        return self.width_nm * 1e-9
+    def routing_width_um(self) -> float:
+        return self.routing_width_nm / 1000.0
+
+    @property
+    def aperture_width_um(self) -> float:
+        if self.aperture_width_nm is not None:
+            return self.aperture_width_nm / 1000.0
+        max_ports = max(self.ports_in, self.ports_out)
+        limit_um = self.body_width_um / max_ports * 0.8
+        return min(max(self.routing_width_um * 1.2, self.routing_width_um), limit_um)
 
     @property
     def height_m(self) -> float:
         return self.height_nm * 1e-9
 
     @property
-    def length_m(self) -> float:
-        return self.length_um * 1e-6
-
-    @property
     def wavelength_m(self) -> float:
         return self.wavelength_nm * 1e-9
 
     @property
-    def x_span_m(self) -> float:
-        return self.length_m + 1.0e-6
+    def total_length_um(self) -> float:
+        return self.body_length_um + 2.0 * (self.taper_length_um + self.access_length_um)
 
     @property
-    def y_span_m(self) -> float:
-        return max(self.width_m + 1.5e-6, 2.0e-6)
+    def total_width_um(self) -> float:
+        return self.body_width_um
 
 
 @dataclass
@@ -494,7 +526,7 @@ class ParsedNaturalLanguageRequest:
     normalized_request: str
     directional_coupler_spec: DirectionalCouplerSpec | None = None
     directional_coupler_sweep_spec: DirectionalCouplerSweepSpec | None = None
-    fdtd_test_spec: FdtdTestSpec | None = None
+    mmi_spec: MmiSpec | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -503,7 +535,7 @@ class ParsedNaturalLanguageRequest:
             "sweep_spec": asdict(self.sweep_spec) if self.sweep_spec is not None else None,
             "directional_coupler_spec": asdict(self.directional_coupler_spec) if self.directional_coupler_spec is not None else None,
             "directional_coupler_sweep_spec": asdict(self.directional_coupler_sweep_spec) if self.directional_coupler_sweep_spec is not None else None,
-            "fdtd_test_spec": asdict(self.fdtd_test_spec) if self.fdtd_test_spec is not None else None,
+            "mmi_spec": asdict(self.mmi_spec) if self.mmi_spec is not None else None,
             "assumptions": self.assumptions,
             "notes": self.notes,
             "normalized_request": self.normalized_request,
@@ -737,8 +769,51 @@ def looks_like_directional_coupler_request(text: str) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
-def looks_like_fdtd_test_request(text: str) -> bool:
-    return "fdtd" in text or ".fsp" in text or "fsp" in text
+def looks_like_mmi_request(text: str) -> bool:
+    return any(
+        keyword in text
+        for keyword in [
+            "mmi",
+            "multi mode interferometer",
+            "multimode interferometer",
+            "multimode interference",
+        ]
+    )
+
+
+def parse_mmi_port_counts(text: str) -> tuple[int, int]:
+    patterns = [
+        re.compile(r"([0-9]+)\s*(?:x|by|×)\s*([0-9]+)\s*(?:mmi|multi\s*mode|multimode)?"),
+        re.compile(r"(?:mmi|multi\s*mode|multimode)\s*([0-9]+)\s*(?:x|by|×)\s*([0-9]+)"),
+    ]
+    for regex in patterns:
+        match = regex.search(text)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return 2, 2
+
+
+def infer_core_material(text: str, default_material: str) -> str:
+    if re.search(r"(?<![a-z0-9])(?:sin|si3n4|silicon\s+nitride|nitride)(?![a-z0-9])", text):
+        return DEFAULT_SIN_MATERIAL
+    if re.search(r"\b(?:si|silicon|soi)\b", text):
+        return "Si (Silicon) - Palik"
+    return default_material
+
+
+def detect_unsupported_component(text: str) -> str | None:
+    unsupported = {
+        "ring resonator": ["ring resonator", "microring", "ring"],
+        "grating coupler": ["grating coupler", "grating"],
+        "MZI": ["mzi", "mach zehnder", "mach-zehnder"],
+        "modulator": ["mzm", "modulator"],
+        "AWG": ["awg", "arrayed waveguide"],
+        "Y-branch/splitter": ["y branch", "y-branch", "ysplitter", "y splitter"],
+    }
+    for label, keywords in unsupported.items():
+        if any(keyword in text for keyword in keywords):
+            return label
+    return None
 
 
 def detect_directional_coupler_sweep_parameter(text: str) -> str | None:
@@ -803,6 +878,7 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
             r"코어\s*높이",
         ],
     )
+    height_was_explicit = height_nm is not None
     wavelength_nm = extract_first_length_nm(
         text,
         [
@@ -825,6 +901,7 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
             r"슬랩",
         ],
     )
+    slab_was_explicit = slab_nm is not None
     etch_depth_nm = extract_first_length_nm(
         text,
         [
@@ -836,6 +913,7 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
             r"에칭\s*깊이",
         ],
     )
+    etch_was_explicit = etch_depth_nm is not None
     sidewall_angle_deg = extract_first_angle_deg(
         text,
         [
@@ -854,6 +932,118 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
 
     full_etch = any(keyword in text for keyword in ["full etch", "fully etched", "full-etch", "전식각", "풀에치", "strip waveguide", "스트립"])
     rib_requested = any(keyword in text for keyword in ["rib waveguide", "rib", "ridge", "partial etch", "partial-etch", "부분식각", "리브", "리지"])
+
+    if looks_like_mmi_request(text):
+        ports_in, ports_out = parse_mmi_port_counts(text)
+        core_material = infer_core_material(text, "Si (Silicon) - Palik")
+        is_sin = core_material == DEFAULT_SIN_MATERIAL
+
+        routing_width_nm = extract_first_length_nm(
+            text,
+            [
+                r"routing\s*waveguide\S*",
+                r"routing\s*wg\S*",
+                r"routing\s*width",
+                r"access\s*waveguide\S*",
+                r"access\s*wg\S*",
+                r"input\s*waveguide\S*",
+                r"output\s*waveguide\S*",
+                r"port\s*width",
+                r"waveguide\s*width",
+                r"wg\s*width",
+            ],
+        )
+        if routing_width_nm is None:
+            if width_was_default:
+                routing_width_nm = DEFAULT_MMI_ROUTING_WIDTH_NM
+                assumptions.append(f"routing waveguide width {routing_width_nm:g} nm")
+            else:
+                routing_width_nm = width_nm
+                notes.append("generic width was interpreted as MMI routing waveguide width")
+
+        mmi_height_nm = height_nm
+        if mmi_height_nm is None and slab_nm is not None and etch_depth_nm is not None:
+            mmi_height_nm = slab_nm + etch_depth_nm
+            notes.append("height was reconstructed from slab thickness + etch depth")
+        elif mmi_height_nm is None and etch_depth_nm is not None:
+            mmi_height_nm = etch_depth_nm if etch_depth_nm > DEFAULT_DEVICE_LAYER_NM or is_sin else DEFAULT_DEVICE_LAYER_NM
+            if mmi_height_nm == DEFAULT_DEVICE_LAYER_NM and not is_sin:
+                assumptions.append(f"SOI device layer {mmi_height_nm:g} nm")
+        elif mmi_height_nm is None:
+            mmi_height_nm = DEFAULT_MMI_SIN_HEIGHT_NM if is_sin else DEFAULT_DEVICE_LAYER_NM
+            material_label = "SiN" if is_sin else "core"
+            assumptions.append(f"{material_label} thickness {mmi_height_nm:g} nm")
+        elif is_sin and not (height_was_explicit or slab_was_explicit or etch_was_explicit):
+            mmi_height_nm = DEFAULT_MMI_SIN_HEIGHT_NM
+            assumptions.append(f"SiN thickness {mmi_height_nm:g} nm")
+
+        if (slab_nm or 0.0) > 0 or rib_requested:
+            notes.append("rib/slab MMI geometry is not implemented yet; generated full-etch MMI layout")
+
+        body_width_um = extract_first_length_um(
+            text,
+            [
+                r"mmi\s*body\s*width",
+                r"mmi\s*width",
+                r"multimode\s*section\s*width",
+                r"body\s*width",
+            ],
+        )
+        if body_width_um is None:
+            body_width_um = DEFAULT_MMI_BODY_WIDTH_UM
+            assumptions.append(f"MMI body width {body_width_um:g} um")
+
+        body_length_um = extract_first_length_um(
+            text,
+            [
+                r"mmi\s*body\s*length",
+                r"mmi\s*length",
+                r"multimode\s*section\s*length",
+                r"body\s*length",
+            ],
+        )
+        if body_length_um is None:
+            body_length_um = DEFAULT_MMI_BODY_LENGTH_UM
+            assumptions.append(f"MMI body length {body_length_um:g} um")
+
+        taper_length_um = extract_first_length_um(text, [r"taper\s*length", r"taper"])
+        if taper_length_um is None:
+            taper_length_um = DEFAULT_MMI_TAPER_LENGTH_UM
+            assumptions.append(f"MMI taper length {taper_length_um:g} um")
+
+        access_length_um = extract_first_length_um(text, [r"access\s*length", r"routing\s*length"])
+        if access_length_um is None:
+            access_length_um = DEFAULT_MMI_ACCESS_LENGTH_UM
+            assumptions.append(f"MMI access length {access_length_um:g} um")
+
+        port_pitch_um = extract_first_length_um(text, [r"port\s*pitch", r"pitch"])
+        if port_pitch_um is None:
+            port_pitch_um = DEFAULT_MMI_PORT_PITCH_UM
+            assumptions.append(f"MMI port pitch {port_pitch_um:g} um")
+
+        mmi_spec = MmiSpec(
+            ports_in=ports_in,
+            ports_out=ports_out,
+            routing_width_nm=routing_width_nm,
+            height_nm=mmi_height_nm,
+            wavelength_nm=wavelength_nm,
+            body_width_um=body_width_um,
+            body_length_um=body_length_um,
+            taper_length_um=taper_length_um,
+            access_length_um=access_length_um,
+            port_pitch_um=port_pitch_um,
+            core_material=core_material,
+            sidewall_angle_deg=sidewall_angle_deg,
+        )
+        return ParsedNaturalLanguageRequest(
+            kind="mmi",
+            mode_spec=None,
+            sweep_spec=None,
+            assumptions=assumptions,
+            notes=notes,
+            normalized_request=text,
+            mmi_spec=mmi_spec,
+        )
 
     if slab_nm is not None and etch_depth_nm is not None and height_nm is None:
         height_nm = slab_nm + etch_depth_nm
@@ -913,7 +1103,9 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
     if abs((height_nm - slab_nm) - etch_depth_nm) > 1.5:
         raise ValueError("height, slab, and etch depth are inconsistent.")
 
-    if looks_like_fdtd_test_request(text):
+    if "fdtd" in text or ".fsp" in text or "fsp" in text:
+        raise ValueError("FDTD requests are handled by the general Codex photonics workflow, not the deterministic helper CLI.")
+    if False:
         if width_was_default:
             assumptions.insert(0, f"waveguide width {width_nm:g} nm")
         length_um = extract_first_length_um(
@@ -932,13 +1124,13 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
             assumptions.append("FDTD test waveguide length 2 um")
         assumptions.append("FDTD project only; no time-domain run")
         return ParsedNaturalLanguageRequest(
-            kind="fdtd_test",
+            kind="removed_smoke_test",
             mode_spec=None,
             sweep_spec=None,
             assumptions=assumptions,
             notes=notes,
             normalized_request=text,
-            fdtd_test_spec=FdtdTestSpec(
+            removed_smoke_test_spec=dict(
                 width_nm=width_nm,
                 height_nm=height_nm,
                 length_um=length_um,
@@ -1086,6 +1278,13 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
             notes=notes,
             normalized_request=text,
             directional_coupler_spec=base_spec,
+        )
+
+    unsupported_component = detect_unsupported_component(text)
+    if unsupported_component is not None:
+        raise ValueError(
+            f"{unsupported_component} is recognized as a photonic component, but this deterministic DSL generator does not support it yet. "
+            "Please provide an explicit implementation target or add a component schema before generating code."
         )
 
     kind = "sweep" if looks_like_sweep_request(text) else "mode"
@@ -1315,8 +1514,8 @@ def directional_coupler_sweep_spec_to_dsl(
     return dsl
 
 
-def fdtd_test_spec_to_dsl(
-    spec: FdtdTestSpec,
+def mmi_spec_to_dsl(
+    spec: MmiSpec,
     raw_request: str | None = None,
     assumptions: list[str] | None = None,
     notes: list[str] | None = None,
@@ -1329,35 +1528,55 @@ def fdtd_test_spec_to_dsl(
             "notes": notes or [],
         },
         "intent": {
-            "component": "waveguide",
-            "task": "fdtd_project_smoke_test",
-            "solver": "FDTD",
+            "component": "mmi",
+            "task": "layout_and_eme_project",
+            "solver": "MODE_EME_project",
         },
         "graph": {
             "nodes": [
                 {
-                    "id": "wg1",
-                    "type": "straight_waveguide",
+                    "id": "mmi1",
+                    "type": "multimode_interferometer",
                     "params": {
-                        "width_nm": spec.width_nm,
+                        "ports_in": spec.ports_in,
+                        "ports_out": spec.ports_out,
+                        "routing_width_nm": spec.routing_width_nm,
                         "height_nm": spec.height_nm,
-                        "length_um": spec.length_um,
+                        "body_width_um": spec.body_width_um,
+                        "body_length_um": spec.body_length_um,
+                        "taper_length_um": spec.taper_length_um,
+                        "access_length_um": spec.access_length_um,
+                        "port_pitch_um": spec.port_pitch_um,
+                        "aperture_width_nm": spec.aperture_width_nm,
                         "core_material": spec.core_material,
                         "clad_material": spec.clad_material,
+                        "sidewall_angle_deg": spec.sidewall_angle_deg,
                     },
                 },
-                {"id": "src", "type": "mode_source", "params": {"wavelength_nm": spec.wavelength_nm}},
-                {"id": "mon", "type": "power_monitor", "params": {"plane": "x-normal"}},
+                *[
+                    {"id": f"in_{idx + 1}", "type": "optical_port", "params": {"side": "west", "index": idx + 1}}
+                    for idx in range(spec.ports_in)
+                ],
+                *[
+                    {"id": f"out_{idx + 1}", "type": "optical_port", "params": {"side": "east", "index": idx + 1}}
+                    for idx in range(spec.ports_out)
+                ],
             ],
             "edges": [
-                {"from": "src", "to": "wg1", "kind": "excitation"},
-                {"from": "wg1", "to": "mon", "kind": "field_monitor"},
+                *[
+                    {"from": f"in_{idx + 1}", "to": "mmi1", "kind": "optical_link"}
+                    for idx in range(spec.ports_in)
+                ],
+                *[
+                    {"from": "mmi1", "to": f"out_{idx + 1}", "kind": "optical_link"}
+                    for idx in range(spec.ports_out)
+                ],
             ],
         },
         "simulation": {
             "wavelength_nm": spec.wavelength_nm,
+            "method": spec.simulation_method,
             "mesh_accuracy": spec.mesh_accuracy,
-            "simulation_time_fs": spec.simulation_time_fs,
             "run": False,
         },
     }
@@ -1600,6 +1819,77 @@ def dc_core_geometry_script_lines(spec: DirectionalCouplerSpec, x_center_m: floa
     ]
 
 
+def mmi_port_offsets_um(count: int, pitch_um: float) -> list[float]:
+    if count <= 1:
+        return [0.0]
+    center = (count - 1) / 2.0
+    return [(index - center) * pitch_um for index in range(count)]
+
+
+def rect_points_um(x1: float, x2: float, y_center: float, width_um: float) -> list[tuple[float, float]]:
+    half = width_um / 2.0
+    return [(x1, y_center - half), (x2, y_center - half), (x2, y_center + half), (x1, y_center + half)]
+
+
+def mmi_geometry_polygons_um(spec: MmiSpec) -> list[tuple[str, list[tuple[float, float]]]]:
+    spec.validate()
+    body_left = -spec.body_length_um / 2.0
+    body_right = spec.body_length_um / 2.0
+    left_taper_start = body_left - spec.taper_length_um
+    left_access_start = left_taper_start - spec.access_length_um
+    right_taper_end = body_right + spec.taper_length_um
+    right_access_end = right_taper_end + spec.access_length_um
+    routing_half = spec.routing_width_um / 2.0
+    aperture_half = spec.aperture_width_um / 2.0
+
+    polygons: list[tuple[str, list[tuple[float, float]]]] = [
+        ("mmi_body", rect_points_um(body_left, body_right, 0.0, spec.body_width_um))
+    ]
+
+    for index, y_center in enumerate(mmi_port_offsets_um(spec.ports_in, spec.port_pitch_um), start=1):
+        polygons.append((f"in_{index}_access", rect_points_um(left_access_start, left_taper_start, y_center, spec.routing_width_um)))
+        polygons.append(
+            (
+                f"in_{index}_taper",
+                [
+                    (left_taper_start, y_center - routing_half),
+                    (body_left, y_center - aperture_half),
+                    (body_left, y_center + aperture_half),
+                    (left_taper_start, y_center + routing_half),
+                ],
+            )
+        )
+
+    for index, y_center in enumerate(mmi_port_offsets_um(spec.ports_out, spec.port_pitch_um), start=1):
+        polygons.append(
+            (
+                f"out_{index}_taper",
+                [
+                    (body_right, y_center - aperture_half),
+                    (right_taper_end, y_center - routing_half),
+                    (right_taper_end, y_center + routing_half),
+                    (body_right, y_center + aperture_half),
+                ],
+            )
+        )
+        polygons.append((f"out_{index}_access", rect_points_um(right_taper_end, right_access_end, y_center, spec.routing_width_um)))
+
+    return polygons
+
+
+def polygon_script_lines(name: str, points_um: list[tuple[float, float]], z_span_m: float, material: str) -> list[str]:
+    points_m = [(x_um * 1e-6, y_um * 1e-6) for x_um, y_um in points_um]
+    variable = re.sub(r"[^A-Za-z0-9_]", "_", f"vtx_{name}")
+    return [
+        f"{variable} = {matrix_literal(points_m)};",
+        f'addpoly; set("name", "{name}");',
+        f'set("vertices", {variable});',
+        "set(\"z\", 0);",
+        f'set("z span", {z_span_m:.12g});',
+        f'set("material", "{material}");',
+    ]
+
+
 def build_mode_script(spec: ModeSpec, project_path: Path, include_solve: bool = True) -> str:
     spec.validate()
     lines = [
@@ -1763,63 +2053,39 @@ def write_dc_scripts(spec: DirectionalCouplerSpec, output_dir: Path) -> tuple[Pa
     return supermode_script, eme_script
 
 
-def build_fdtd_test_script(spec: FdtdTestSpec, project_path: Path) -> str:
+def build_mmi_eme_script(spec: MmiSpec, project_path: Path) -> str:
     spec.validate()
-    source_x = -0.35 * spec.length_m
-    monitor_x = 0.35 * spec.length_m
-    return "\n".join(
+    x_span_m = (spec.total_length_um + 4.0) * 1e-6
+    y_span_m = (spec.total_width_um + 4.0) * 1e-6
+    z_span_m = spec.height_m
+    lines = [
+        "newproject;",
+        "switchtolayout;",
+        "deleteall;",
+        'addrect; set("name", "clad");',
+        "set(\"x\", 0);",
+        f'set("x span", {x_span_m:.12g});',
+        "set(\"y\", 0);",
+        f'set("y span", {y_span_m:.12g});',
+        "set(\"z\", 0);",
+        f'set("z span", {max(spec.height_m + 1.5e-6, 2e-6):.12g});',
+        f'set("material", "{spec.clad_material}");',
+    ]
+    for name, points in mmi_geometry_polygons_um(spec):
+        lines.extend(polygon_script_lines(name, points, z_span_m, spec.core_material))
+    lines.extend(
         [
-            "newproject;",
-            "switchtolayout;",
-            "deleteall;",
-            'addrect; set("name", "clad");',
-            'set("x", 0);',
-            f'set("x span", {spec.x_span_m:.12g});',
-            'set("y", 0);',
-            f'set("y span", {spec.y_span_m:.12g});',
-            'set("z", 0);',
-            f'set("z span", {max(spec.height_m + 1.0e-6, 1.5e-6):.12g});',
-            f'set("material", "{spec.clad_material}");',
-            'addrect; set("name", "core");',
-            'set("x", 0);',
-            f'set("x span", {spec.length_m:.12g});',
-            'set("y", 0);',
-            f'set("y span", {spec.width_m:.12g});',
-            'set("z", 0);',
-            f'set("z span", {spec.height_m:.12g});',
-            f'set("material", "{spec.core_material}");',
-            "addfdtd;",
-            'set("dimension", "2D");',
-            'set("x", 0);',
-            f'set("x span", {spec.x_span_m:.12g});',
-            'set("y", 0);',
-            f'set("y span", {spec.y_span_m:.12g});',
-            f'set("mesh accuracy", {spec.mesh_accuracy});',
-            f'set("simulation time", {spec.simulation_time_fs * 1e-15:.12g});',
-            "addmode;",
-            'set("name", "mode_source");',
-            'set("injection axis", "x-axis");',
-            'set("direction", "Forward");',
-            f'set("x", {source_x:.12g});',
-            'set("y", 0);',
-            f'set("y span", {min(spec.y_span_m * 0.8, 1.5e-6):.12g});',
-            f'set("wavelength start", {spec.wavelength_m:.12g});',
-            f'set("wavelength stop", {spec.wavelength_m:.12g});',
-            "addpower;",
-            'set("name", "through_monitor");',
-            'set("monitor type", "2D X-normal");',
-            f'set("x", {monitor_x:.12g});',
-            'set("y", 0);',
-            f'set("y span", {min(spec.y_span_m * 0.8, 1.5e-6):.12g});',
+            "addeme;",
+            "# Geometry-only EME project for the MMI. Ports/cell groups should be reviewed before production sweeps.",
             f'save("{project_path.as_posix()}");',
-            "",
         ]
     )
+    return "\n".join(lines) + "\n"
 
 
-def write_fdtd_test_script(spec: FdtdTestSpec, output_dir: Path) -> Path:
-    script_path = output_dir / "fdtd_test.lsf"
-    script_path.write_text(build_fdtd_test_script(spec, output_dir / "fdtd_test.fsp"), encoding="utf-8")
+def write_mmi_script(spec: MmiSpec, output_dir: Path) -> Path:
+    script_path = output_dir / "mmi_eme.lsf"
+    script_path.write_text(build_mmi_eme_script(spec, output_dir / "mmi_eme.lms"), encoding="utf-8")
     return script_path
 
 
@@ -2358,17 +2624,31 @@ def execute_nl_command(request: str, output_dir: Path | None = None, timeout_s: 
         remember_task(parsed.kind, request, dsl, payload)
         return payload
 
-    assert parsed.fdtd_test_spec is not None
-    dsl = fdtd_test_spec_to_dsl(parsed.fdtd_test_spec, raw_request=request, assumptions=parsed.assumptions, notes=parsed.notes)
-    payload = execute_fdtd_test_command(
-        parsed.fdtd_test_spec,
-        output_dir=run_dir,
-        timeout_s=timeout_s,
-        script_only=script_only,
-        raw_request=request,
-        assumptions=parsed.assumptions,
-        notes=parsed.notes,
-    )
+    if parsed.kind == "mmi":
+        assert parsed.mmi_spec is not None
+        dsl = mmi_spec_to_dsl(parsed.mmi_spec, raw_request=request, assumptions=parsed.assumptions, notes=parsed.notes)
+        payload = execute_mmi_command(
+            parsed.mmi_spec,
+            output_dir=run_dir,
+            timeout_s=timeout_s,
+            script_only=script_only,
+            raw_request=request,
+            assumptions=parsed.assumptions,
+            notes=parsed.notes,
+        )
+        payload["parsed"] = parsed.to_dict()
+        payload["attachments"].append(str(parsed_path.resolve()))
+        if parsed.notes:
+            payload["message"] += " Notes: " + "; ".join(parsed.notes) + "."
+        payload = add_report_context(payload, None, similar_records)
+        remember_task(parsed.kind, request, dsl, payload)
+        return payload
+
+    raise RuntimeError(f"Unhandled photonics helper request kind: {parsed.kind}")
+    assert False
+    dsl = {}
+    payload = {}
+    _removed_smoke_test = parsed.kind
     payload["parsed"] = parsed.to_dict()
     payload["attachments"].append(str(parsed_path.resolve()))
     if parsed.notes:
@@ -2563,6 +2843,31 @@ def write_basic_dc_gds(spec: DirectionalCouplerSpec, path: Path) -> Path:
     return path
 
 
+def write_mmi_gds(spec: MmiSpec, path: Path) -> Path:
+    spec.validate()
+    now = datetime.now()
+    date_values = [now.year, now.month, now.day, now.hour, now.minute, now.second] * 2
+    boundaries = [
+        gds_boundary(1, 0, [(x_um * 1000.0, y_um * 1000.0) for x_um, y_um in points])
+        for _, points in mmi_geometry_polygons_um(spec)
+    ]
+    payload = b"".join(
+        [
+            gds_record(0x00, 0x02, gds_int2([600])),
+            gds_record(0x01, 0x02, gds_int2(date_values)),
+            gds_record(0x02, 0x06, gds_string("PHOTONICS_AGENT")),
+            gds_record(0x03, 0x05, gds_real8(0.001) + gds_real8(1e-9)),
+            gds_record(0x05, 0x02, gds_int2(date_values)),
+            gds_record(0x06, 0x06, gds_string(f"MMI_{spec.ports_in}X{spec.ports_out}")),
+            *boundaries,
+            gds_record(0x07, 0x00),
+            gds_record(0x04, 0x00),
+        ]
+    )
+    path.write_bytes(payload)
+    return path
+
+
 def write_dc_preview(spec: DirectionalCouplerSpec, output_path: Path) -> Path | None:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -2590,29 +2895,39 @@ def write_dc_preview(spec: DirectionalCouplerSpec, output_path: Path) -> Path | 
     return output_path
 
 
-def write_fdtd_test_preview(spec: FdtdTestSpec, output_path: Path) -> Path | None:
+def write_mmi_preview(spec: MmiSpec, output_path: Path) -> Path | None:
     try:
         from PIL import Image, ImageDraw, ImageFont
     except Exception:
         return None
 
     spec.validate()
-    canvas = Image.new("RGB", (820, 360), "white")
+    canvas = Image.new("RGB", (980, 520), "white")
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
-    left, right = 90, 730
-    center_y = 175
-    height_px = max(18, spec.width_nm * 0.12)
-    draw.rectangle((left, center_y - height_px / 2, right, center_y + height_px / 2), fill=(25, 95, 170), outline=(10, 50, 100))
-    source_x = left + 0.15 * (right - left)
-    monitor_x = left + 0.85 * (right - left)
-    draw.line((source_x, 80, source_x, 270), fill=(230, 90, 40), width=3)
-    draw.line((monitor_x, 80, monitor_x, 270), fill=(40, 150, 80), width=3)
-    draw.text((90, 28), "Minimal FDTD project preview", fill="black", font=font)
-    draw.text((source_x - 25, 60), "source", fill="black", font=font)
-    draw.text((monitor_x - 28, 60), "monitor", fill="black", font=font)
-    draw.text((90, 310), f"width={spec.width_nm:g} nm, height={spec.height_nm:g} nm, length={spec.length_um:g} um", fill="black", font=font)
-    draw.text((90, 330), f"wavelength={spec.wavelength_nm:g} nm, project-only smoke test, no run", fill="black", font=font)
+    polygons = mmi_geometry_polygons_um(spec)
+    xs = [x for _, points in polygons for x, _ in points]
+    ys = [y for _, points in polygons for _, y in points]
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    margin = 70
+    scale = min((900 - 2 * margin) / max(x_max - x_min, 1e-9), (390 - 2 * margin) / max(y_max - y_min, 1e-9))
+
+    def map_point(point: tuple[float, float]) -> tuple[float, float]:
+        x, y = point
+        px = margin + (x - x_min) * scale
+        py = 330 - (margin + (y - y_min) * scale)
+        return px, py
+
+    core_color = (23, 105, 170) if spec.core_material != DEFAULT_SIN_MATERIAL else (35, 130, 115)
+    for name, points in polygons:
+        mapped = [map_point(point) for point in points]
+        fill = (35, 130, 115) if name == "mmi_body" and spec.core_material == DEFAULT_SIN_MATERIAL else core_color
+        draw.polygon(mapped, fill=fill, outline=(10, 45, 80))
+    draw.text((70, 24), f"{spec.ports_in}x{spec.ports_out} MMI layout preview", fill="black", font=font)
+    draw.text((70, 420), f"body={spec.body_width_um:g} x {spec.body_length_um:g} um, routing width={spec.routing_width_nm:g} nm, pitch={spec.port_pitch_um:g} um", fill="black", font=font)
+    draw.text((70, 442), f"height={spec.height_nm:g} nm, material={spec.core_material}, wavelength={spec.wavelength_nm:g} nm", fill="black", font=font)
+    draw.text((70, 464), "EME project is geometry-only; review ports/cell groups before production simulation.", fill="black", font=font)
     canvas.save(output_path)
     return output_path
 
@@ -2892,22 +3207,22 @@ def live_dc_sweep_analysis(spec: DirectionalCouplerSweepSpec, output_dir: Path) 
     return payload
 
 
-def live_fdtd_test_analysis(spec: FdtdTestSpec, output_dir: Path) -> dict[str, Any]:
+def live_mmi_project_analysis(spec: MmiSpec, output_dir: Path) -> dict[str, Any]:
     spec.validate()
     lumapi, api_dir = load_lumapi(spec.lumapi_dir)
     output_dir = ensure_directory(output_dir)
-    project_path = output_dir / "fdtd_test.fsp"
+    project_path = output_dir / "mmi_eme.lms"
     result_payload: dict[str, Any] = {
         "api_dir": str(api_dir),
         "project_path": str(project_path.resolve()),
         "spec": asdict(spec),
     }
 
-    sim = lumapi.FDTD(hide=spec.hide)
+    sim = lumapi.MODE(hide=spec.hide)
     try:
-        sim.eval(build_fdtd_test_script(spec, project_path))
+        sim.eval(build_mmi_eme_script(spec, project_path))
         result_payload["ok"] = True
-        result_payload["message"] = "FDTD smoke-test project was created without running time-domain simulation."
+        result_payload["message"] = "MMI EME project was created without running propagation analysis."
         return result_payload
     finally:
         try:
@@ -2959,17 +3274,21 @@ def summarize_dc_sweep_result(result: dict[str, Any], spec: DirectionalCouplerSw
     return message
 
 
-def summarize_fdtd_test_result(result: dict[str, Any], spec: FdtdTestSpec, fallback_reason: str | None = None) -> str:
+def summarize_mmi_result(result: dict[str, Any], spec: MmiSpec, fallback_reason: str | None = None) -> str:
+    base = (
+        f"{spec.ports_in}x{spec.ports_out} MMI layout을 생성했습니다. "
+        f"routing waveguide {spec.routing_width_nm:g} nm, body {spec.body_width_um:g} x {spec.body_length_um:g} um, "
+        f"height {spec.height_nm:g} nm, material {spec.core_material}, wavelength {spec.wavelength_nm:g} nm 기준입니다."
+    )
     if fallback_reason:
         return (
-            f"간단한 FDTD 테스트 프로젝트 파일을 준비했습니다. width {spec.width_nm:g} nm, "
-            f"height {spec.height_nm:g} nm, length {spec.length_um:g} um 기준이며 live FDTD 저장은 완료되지 않았습니다. "
-            f"이유는 {fallback_reason} 입니다."
+            base
+            + f" live EME project 저장은 완료되지 않아 GDS/preview/LSF만 남겼고, 이유는 {fallback_reason} 입니다. "
+            + "현재 EME 파일은 geometry skeleton이므로 production run 전 port와 cell group 검토가 필요합니다."
         )
     return (
-        f"간단한 FDTD 테스트 프로젝트를 생성했습니다. width {spec.width_nm:g} nm, height {spec.height_nm:g} nm, "
-        f"length {spec.length_um:g} um, wavelength {spec.wavelength_nm:g} nm 기준입니다. "
-        "시간영역 run은 하지 않고 .fsp 저장까지만 수행했습니다."
+        base
+        + " EME project 파일까지 저장했습니다. 전파 해석은 실행하지 않았고, production sweep 전 port와 cell group 검토가 필요합니다."
     )
 
 
@@ -3164,18 +3483,19 @@ def execute_dc_sweep_command(spec: DirectionalCouplerSweepSpec, output_dir: Path
     return add_report_context(result, directional_coupler_sweep_spec_to_dsl(spec, raw_request=raw_request, assumptions=assumptions, notes=notes))
 
 
-def execute_fdtd_test_command(spec: FdtdTestSpec, output_dir: Path | None = None, timeout_s: int = DEFAULT_TIMEOUT_S, script_only: bool = False, raw_request: str | None = None, assumptions: list[str] | None = None, notes: list[str] | None = None) -> dict[str, Any]:
+def execute_mmi_command(spec: MmiSpec, output_dir: Path | None = None, timeout_s: int = DEFAULT_TIMEOUT_S, script_only: bool = False, raw_request: str | None = None, assumptions: list[str] | None = None, notes: list[str] | None = None) -> dict[str, Any]:
     spec.validate()
-    run_dir = ensure_directory(output_dir or (output_root() / f"fdtd-test-{timestamp()}"))
-    spec_path = run_dir / "fdtd_test_spec.json"
+    run_dir = ensure_directory(output_dir or (output_root() / f"mmi-{timestamp()}"))
+    spec_path = run_dir / "mmi_spec.json"
     write_json(spec_path, asdict(spec))
-    dsl = fdtd_test_spec_to_dsl(spec, raw_request=raw_request, assumptions=assumptions, notes=notes)
+    dsl = mmi_spec_to_dsl(spec, raw_request=raw_request, assumptions=assumptions, notes=notes)
     design_path = write_design_yaml(run_dir, dsl)
-    script_path = write_fdtd_test_script(spec, run_dir)
-    preview_path = write_fdtd_test_preview(spec, run_dir / "fdtd_test_preview.png")
+    script_path = write_mmi_script(spec, run_dir)
+    gds_path = write_mmi_gds(spec, run_dir / "mmi.gds")
+    preview_path = write_mmi_preview(spec, run_dir / "mmi_preview.png")
     attachments = [
         str(path.resolve())
-        for path in [preview_path, script_path, spec_path, design_path]
+        for path in [preview_path, gds_path, script_path, spec_path, design_path]
         if path is not None
     ]
     result: dict[str, Any] = {
@@ -3186,10 +3506,10 @@ def execute_fdtd_test_command(spec: FdtdTestSpec, output_dir: Path | None = None
     }
 
     if script_only:
-        message = summarize_fdtd_test_result(result, spec, fallback_reason="script-only mode")
+        message = summarize_mmi_result(result, spec, fallback_reason="script-only mode")
         pipeline_path = write_agent_pipeline(
             run_dir,
-            {"kind": "fdtd_test", "route": "script_only"},
+            {"kind": "mmi", "route": "script_only"},
             spec_path,
             design_path,
             attachments,
@@ -3201,19 +3521,19 @@ def execute_fdtd_test_command(spec: FdtdTestSpec, output_dir: Path | None = None
         result["attachments"].append(str(pipeline_path.resolve()))
         return add_report_context(result, dsl)
 
-    live_ok, live_error = run_live_subprocess("_live_fdtd_test", spec_path, run_dir, timeout_s=timeout_s)
+    live_ok, live_error = run_live_subprocess("_live_mmi", spec_path, run_dir, timeout_s=timeout_s)
     if live_ok:
         live_result = json.loads((run_dir / "live_result.json").read_text(encoding="utf-8"))
-        fsp_path = run_dir / "fdtd_test.fsp"
-        if fsp_path.exists():
-            attachments.append(str(fsp_path.resolve()))
-        message = summarize_fdtd_test_result(live_result, spec)
+        lms_path = run_dir / "mmi_eme.lms"
+        if lms_path.exists():
+            attachments.append(str(lms_path.resolve()))
+        message = summarize_mmi_result(live_result, spec)
         summary_path = run_dir / "summary.json"
         write_json(summary_path, {"message": message, "spec": asdict(spec), "result": live_result})
         attachments.append(str(summary_path.resolve()))
         pipeline_path = write_agent_pipeline(
             run_dir,
-            {"kind": "fdtd_test", "route": "live_project_create"},
+            {"kind": "mmi", "route": "live_project_create"},
             spec_path,
             design_path,
             attachments,
@@ -3225,13 +3545,13 @@ def execute_fdtd_test_command(spec: FdtdTestSpec, output_dir: Path | None = None
         result.update({"status": "created", "message": message, "live_result": live_result, "attachments": attachments})
         return add_report_context(result, dsl)
 
-    message = summarize_fdtd_test_result(result, spec, fallback_reason=live_error or "unknown error")
+    message = summarize_mmi_result(result, spec, fallback_reason=live_error or "unknown error")
     summary_path = run_dir / "summary.json"
     write_json(summary_path, {"message": message, "spec": asdict(spec), "result": result, "live_error": live_error})
     attachments.append(str(summary_path.resolve()))
     pipeline_path = write_agent_pipeline(
         run_dir,
-        {"kind": "fdtd_test", "route": "fallback"},
+        {"kind": "mmi", "route": "fallback"},
         spec_path,
         design_path,
         attachments,
@@ -3256,10 +3576,9 @@ def environment_summary(explicit: str | None = None) -> dict[str, Any]:
             "/sweep start=400 stop=700 step=25 height=220 wavelength=1550",
             "/dc width=500 height=220 gap=200 coupling_length=20",
             "/dc_sweep parameter=gap start=100 stop=300 step=50 width=500 height=220",
-            "/fdtd_test width=500 height=220 length=2",
+            "/mmi ports_in=2 ports_out=2 material=sin routing_width=1500 body_width=6 body_length=60",
             "기본적인 etch depth 220nm SOI waveguide mode profile 그려줘",
             "50대 50 directional coupler 기본 설계하고 GDS랑 시뮬레이션 파일 보내줘",
-            "아주 간단한 FDTD 테스트 프로젝트 만들어줘",
         ],
     }
 
@@ -3269,7 +3588,7 @@ def environment_summary(explicit: str | None = None) -> dict[str, Any]:
         payload["lumapi_file"] = getattr(lumapi, "__file__", None)
         payload["selected_lumapi_dir"] = str(api_dir)
         payload["message"] = (
-            "lumapi import는 가능합니다. 이제 /mode, /sweep, /dc, /dc_sweep, /fdtd_test 명령을 사용할 수 있습니다."
+            "lumapi import는 가능합니다. 이제 /mode, /sweep, /dc, /dc_sweep, /mmi 명령을 사용할 수 있습니다."
         )
     except Exception as exc:
         payload["lumapi_importable"] = False
@@ -3319,12 +3638,12 @@ def parse_args() -> argparse.Namespace:
     dc_sweep_parser.add_argument("--output-dir", default=None)
     dc_sweep_parser.add_argument("--json", action="store_true")
 
-    fdtd_parser = subparsers.add_parser("fdtd_test", help="Create a minimal FDTD smoke-test project")
-    add_fdtd_test_arguments(fdtd_parser)
-    fdtd_parser.add_argument("--timeout-s", type=int, default=DEFAULT_TIMEOUT_S)
-    fdtd_parser.add_argument("--script-only", action="store_true")
-    fdtd_parser.add_argument("--output-dir", default=None)
-    fdtd_parser.add_argument("--json", action="store_true")
+    mmi_parser = subparsers.add_parser("mmi", help="Run or prepare an MMI layout and EME project")
+    add_mmi_arguments(mmi_parser)
+    mmi_parser.add_argument("--timeout-s", type=int, default=DEFAULT_TIMEOUT_S)
+    mmi_parser.add_argument("--script-only", action="store_true")
+    mmi_parser.add_argument("--output-dir", default=None)
+    mmi_parser.add_argument("--json", action="store_true")
 
     nl_parser = subparsers.add_parser("nl", help="Parse and run a natural language photonics request")
     nl_parser.add_argument("--request", required=True)
@@ -3349,9 +3668,9 @@ def parse_args() -> argparse.Namespace:
     live_dc_sweep_parser.add_argument("--spec", required=True)
     live_dc_sweep_parser.add_argument("--output-dir", required=True)
 
-    live_fdtd_test_parser = subparsers.add_parser("_live_fdtd_test")
-    live_fdtd_test_parser.add_argument("--spec", required=True)
-    live_fdtd_test_parser.add_argument("--output-dir", required=True)
+    live_mmi_parser = subparsers.add_parser("_live_mmi")
+    live_mmi_parser.add_argument("--spec", required=True)
+    live_mmi_parser.add_argument("--output-dir", required=True)
 
     return parser.parse_args()
 
@@ -3411,15 +3730,22 @@ def add_dc_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lumapi-dir", default=None)
 
 
-def add_fdtd_test_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--width-nm", type=float, default=DEFAULT_MODE_WIDTH_NM)
+def add_mmi_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--ports-in", type=int, default=2)
+    parser.add_argument("--ports-out", type=int, default=2)
+    parser.add_argument("--routing-width-nm", type=float, default=DEFAULT_MMI_ROUTING_WIDTH_NM)
     parser.add_argument("--height-nm", type=float, default=DEFAULT_DEVICE_LAYER_NM)
-    parser.add_argument("--length-um", type=float, default=2.0)
     parser.add_argument("--wavelength-nm", type=float, default=DEFAULT_WAVELENGTH_NM)
+    parser.add_argument("--body-width-um", type=float, default=DEFAULT_MMI_BODY_WIDTH_UM)
+    parser.add_argument("--body-length-um", type=float, default=DEFAULT_MMI_BODY_LENGTH_UM)
+    parser.add_argument("--taper-length-um", type=float, default=DEFAULT_MMI_TAPER_LENGTH_UM)
+    parser.add_argument("--access-length-um", type=float, default=DEFAULT_MMI_ACCESS_LENGTH_UM)
+    parser.add_argument("--port-pitch-um", type=float, default=DEFAULT_MMI_PORT_PITCH_UM)
+    parser.add_argument("--aperture-width-nm", type=float, default=None)
     parser.add_argument("--core-material", default="Si (Silicon) - Palik")
     parser.add_argument("--clad-material", default="SiO2 (Glass) - Palik")
-    parser.add_argument("--mesh-accuracy", type=int, default=1)
-    parser.add_argument("--simulation-time-fs", type=float, default=50.0)
+    parser.add_argument("--sidewall-angle-deg", type=float, default=90.0)
+    parser.add_argument("--mesh-accuracy", type=int, default=3)
     parser.add_argument("--show-gui", action="store_true")
     parser.add_argument("--lumapi-dir", default=None)
 
@@ -3496,16 +3822,23 @@ def dc_sweep_spec_from_args(args: argparse.Namespace) -> DirectionalCouplerSweep
     )
 
 
-def fdtd_test_spec_from_args(args: argparse.Namespace) -> FdtdTestSpec:
-    return FdtdTestSpec(
-        width_nm=args.width_nm,
+def mmi_spec_from_args(args: argparse.Namespace) -> MmiSpec:
+    return MmiSpec(
+        ports_in=args.ports_in,
+        ports_out=args.ports_out,
+        routing_width_nm=args.routing_width_nm,
         height_nm=args.height_nm,
-        length_um=args.length_um,
         wavelength_nm=args.wavelength_nm,
+        body_width_um=args.body_width_um,
+        body_length_um=args.body_length_um,
+        taper_length_um=args.taper_length_um,
+        access_length_um=args.access_length_um,
+        port_pitch_um=args.port_pitch_um,
+        aperture_width_nm=args.aperture_width_nm,
         core_material=args.core_material,
         clad_material=args.clad_material,
+        sidewall_angle_deg=args.sidewall_angle_deg,
         mesh_accuracy=args.mesh_accuracy,
-        simulation_time_fs=args.simulation_time_fs,
         hide=not args.show_gui,
         lumapi_dir=args.lumapi_dir,
     )
@@ -3579,10 +3912,10 @@ def main() -> int:
             emit(payload, json_only=args.json)
             return 0
 
-        if args.command == "fdtd_test":
+        if args.command == "mmi":
             output_dir = Path(args.output_dir).resolve() if args.output_dir else None
-            payload = execute_fdtd_test_command(
-                fdtd_test_spec_from_args(args),
+            payload = execute_mmi_command(
+                mmi_spec_from_args(args),
                 output_dir=output_dir,
                 timeout_s=args.timeout_s,
                 script_only=args.script_only,
@@ -3626,9 +3959,9 @@ def main() -> int:
             write_json(Path(args.output_dir) / "live_result.json", result)
             return 0
 
-        if args.command == "_live_fdtd_test":
+        if args.command == "_live_mmi":
             spec_data = json.loads(Path(args.spec).read_text(encoding="utf-8"))
-            result = live_fdtd_test_analysis(FdtdTestSpec(**spec_data), Path(args.output_dir))
+            result = live_mmi_project_analysis(MmiSpec(**spec_data), Path(args.output_dir))
             write_json(Path(args.output_dir) / "live_result.json", result)
             return 0
 

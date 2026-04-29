@@ -1,29 +1,76 @@
 # Telegram Photonics Bridge
 
-텔레그램 메시지를 받아 이 PC에서 Codex와 Lumerical API를 사용해 포토닉 설계 작업을 처리하는 브리지입니다.
+Telegram 메시지를 받아 이 PC에서 Codex와 Lumerical API를 사용해 photonic design 작업을 처리하는 브리지입니다.
 
-## 현재 기능
+목표는 두 가지입니다.
 
-- 일반 자연어 요청은 `codex exec` 로 전달
-- 포토닉 관련 자연어 요청은 `photonics_agent.py nl` 로 직접 처리
-- 포토닉 구조화 명령은 `photonics_agent.py` 로 직접 처리
-- 기본 지원 작업
-  - `MODE` 기반 strip / rib waveguide mode solve
-  - width sweep
-  - directional coupler 기본 설계
-  - directional coupler gap sweep / coupling length sweep
-  - YAML DSL 기반 중간 spec (`design.yaml`)
-  - stage별 멀티 에이전트 trace (`agent_pipeline.yaml`)
-  - 외부 GDS 패키지 없이 기본 directional coupler `.gds` 생성
-  - directional coupler용 EME 재현 스크립트와 FDE supermode sandbox solve
-  - 간단한 FDTD smoke-test project 생성 (`.fsp`, run 없음)
-  - `etch depth / slab / wg thickness / sidewall angle` 자연어 해석
-  - mode profile PNG 자동 생성
-  - 재현용 `.lsf`, `.lms`, spec, summary 자동 저장
+- 반복적이고 검증된 작업은 deterministic helper로 빠르게 처리합니다.
+- helper에 없는 component는 Codex multi-agent workflow로 DSL, Lumerical code, GDS, project file, preview, debug/refine까지 수행합니다.
 
-## 텔레그램에서 쓰는 방법
+## Current Architecture
 
-구조화 명령 예시:
+```text
+Telegram Bot
+  -> Intent Agent
+  -> Spec Agent
+  -> Code Writer Agent
+  -> Code Reviewer Agent
+  -> Sandbox Runner
+  -> Result Evaluator Agent
+  -> Debug / Refine Agent
+  -> Telegram Report + Files
+```
+
+현재 구현은 두 경로로 라우팅합니다.
+
+### Known Helper Path
+
+아래 작업은 `photonics_agent.py` deterministic helper가 직접 처리합니다.
+
+- MODE 기반 strip / rib waveguide mode solve
+- waveguide width sweep
+- directional coupler 기본 설계
+- directional coupler gap sweep / coupling length sweep
+- directional coupler FDE supermode solve 및 even/odd parity check
+- directional coupler GDS / preview / FDE `.lms` / EME `.lms` 생성
+- 2x2 MMI 기본 layout / GDS / EME project skeleton 생성
+- YAML DSL (`design.yaml`) 및 pipeline trace (`agent_pipeline.yaml`) 생성
+
+### General Component Path
+
+아래처럼 helper에 없는 component나 더 추상적인 요청은 `codex_photonics` 경로로 보냅니다.
+
+- ring resonator
+- grating coupler
+- MZI / Mach-Zehnder
+- AWG
+- splitter / Y-branch
+- photonic crystal / cavity
+- taper / bend
+- modulator
+- component-specific FDTD / EME / MODE workflow
+
+General path는 자연어를 바로 Lumerical code로 만들지 않고, 먼저 YAML DSL을 만들도록 프롬프트되어 있습니다. Component는 node, optical link / excitation / monitor는 edge로 표현합니다.
+
+## Debug And Research Policy
+
+- Lumerical/Codex 실행이 실패하면 `codex_photonics` 경로는 transcript의 stdout/stderr를 Debug / Refine prompt에 넣어 한 번 더 재실행합니다.
+- Lumerical 에러 메시지는 Debug / Refine Agent의 1차 입력으로 취급합니다.
+- local helper가 모르는 component/API/property는 공식 Ansys/Lumerical 문서를 우선 확인하도록 프롬프트되어 있습니다.
+- 필요하면 공식 문서 스니펫을 `data/docs/lumerical/` 아래에 source URL과 함께 캐시할 수 있습니다.
+- 3D FDTD, 긴 EME sweep, optimization loop, 큰 parameter sweep은 실행 전에 ETA와 조건을 보여주고 사용자 확인을 받아야 합니다.
+
+주요 공식 문서:
+
+- https://optics.ansys.com/hc/en-us/articles/360037824513-Python-API-overview
+- https://optics.ansys.com/hc/en-us/articles/38660003331859-Lumerical-Python-API-Reference
+- https://optics.ansys.com/hc/en-us/articles/360034923553
+- https://developer.ansys.com/docs/lumerical/python-lumapi
+- https://developer.ansys.com/docs/lumerical/scripting-language
+
+## Telegram Usage
+
+Structured commands:
 
 ```text
 /photonics_status
@@ -58,17 +105,13 @@
 ```
 
 ```text
-/fdtd_test width=500 height=220 length=2
+/mmi ports_in=2 ports_out=2 material=sin routing_width=1500 body_width=6 body_length=60
 ```
 
-자연어 예시:
+Natural language examples:
 
 ```text
 기본적인 etch depth 220nm, sidewall angle 90도인 SOI waveguide의 mode profile 그려서 보내줘
-```
-
-```text
-기본적인 etch depth 300nm, sidewall angle 88도인 SOI waveguide의 mode profile 그려서 보내줘
 ```
 
 ```text
@@ -84,122 +127,83 @@ directional coupler gap sweep 100nm to 300nm step 50nm 해줘
 ```
 
 ```text
-50대 50 directional coupler coupling length sweep 5um to 60um step 5um 해줘
+2 by 2 MMI design해줘. 물질은 SiN이고 routing waveguide는 1.5um야
 ```
 
 ```text
-아주 간단한 FDTD 테스트 프로젝트 만들어줘
+ring resonator design해줘. SiN platform 기준으로 GDS랑 Lumerical project 만들어줘
 ```
 
-## 기본값
+```text
+grating coupler FDTD project 만들어줘. 실행 전에 ETA 확인해줘
+```
 
-자연어 요청에서 값이 빠지면 아래 기본값을 사용합니다.
+## Defaults
 
-- width: `500 nm`
-- wavelength: `1550 nm`
+자연어 요청에서 값이 빠지면 아래 기본값을 사용하거나, 설계를 크게 바꾸는 값이면 먼저 확인을 요청합니다.
+
+- Waveguide width: `500 nm`
+- Wavelength: `1550 nm`
 - SOI device layer thickness: `220 nm`
-- sidewall angle: `90 deg`
-- 명시가 없으면 기본은 full-etch strip
-- rib라고만 쓰면 slab 기본값은 `90 nm`
-- directional coupler gap: `200 nm`
-- directional coupler 초기 coupling length: `20 um`
-- directional coupler input/output straight length: 각각 `10 um`
-- directional coupler target split: 명시 없으면 `50:50`
+- Sidewall angle: `90 deg`
+- 기본 waveguide: full-etch strip
+- Rib slab 기본값: `90 nm`
+- Directional coupler gap: `200 nm`
+- Directional coupler initial coupling length: `20 um`
+- Directional coupler input/output straight length: `10 um`
+- Directional coupler target split: `50:50`
+- MMI routing waveguide width: `1500 nm`
+- SiN MMI core thickness: `400 nm`
+- MMI body width / length: `6 um` / `60 um`
+- MMI taper / access length: `15 um` / `10 um`
+- MMI port pitch: `2 um`
 
-해석 규칙 예시:
+## Output Policy
 
-- `etch depth 220nm` + SOI waveguide
-  - 기본 `220 nm` SOI 위의 full-etch strip로 해석
-- `etch depth 300nm` + top silicon thickness 미지정
-  - `300 nm` device layer full-etch 구조로 추론
-- `wg thickness 220nm`
-  - 기본적으로 top silicon / device layer thickness로 해석
-- `slab 90nm`, `height 220nm`
-  - partial-etch rib로 해석
+작업 결과는 기본적으로 `data/photonics` 아래에 저장됩니다.
 
-## 출력 파일
+생성될 수 있는 파일:
 
-포토닉 작업 결과는 `data/photonics` 아래에 저장됩니다.
-
-일반적으로 아래 파일이 생깁니다.
-
-- `mode_spec.json` 또는 `sweep_spec.json`
-- `directional_coupler_spec.json` 또는 `directional_coupler_sweep_spec.json`
-- `parsed_request.json`
 - `design.yaml`
 - `agent_pipeline.yaml`
-- `mode_job.lsf` 또는 `seed_mode.lsf`
+- `parsed_request.json`
+- `mode_spec.json` / `sweep_spec.json`
+- `directional_coupler_spec.json` / `directional_coupler_sweep_spec.json`
+- `mmi_spec.json`
+- `mode_job.lsf` / `seed_mode.lsf`
 - `dc_supermode_fde.lsf`
 - `dc_eme.lsf`
+- `mmi_eme.lsf`
 - `mode_job.lms`
+- `dc_supermode_fde.lms`
+- `dc_eme.lms`
+- `mmi_eme.lms`
 - `summary.json`
 - `mode1_intensity.png`
-- `sweep_results.csv`
 - `neff_vs_width.png`
-- `directional_coupler.gds`
 - `directional_coupler_preview.png`
-- `dc_gap_sweep.csv`
-- `dc_length_sweep.csv`
-- `dc_gap_sweep_l50.png` 또는 `dc_length_sweep_power.png`
+- `mmi_preview.png`
+- `directional_coupler.gds`
+- `mmi.gds`
+- sweep CSV / plot files
 
-## YAML DSL / Agent Pipeline
+Telegram으로는 기본적으로 아래만 보냅니다.
 
-자연어 요청은 바로 Python/GDS 코드로 가지 않고 먼저 `design.yaml` 로 정규화됩니다.
+- Preview image
+- `.gds`
+- Lumerical project file: `.lms`, `.fsp`, `.ldev`, `.icp`
 
-Telegram 동작은 아래 정책을 따릅니다.
+`design.yaml`, JSON, LSF, CSV, task memory는 workspace에 저장하지만 Telegram 메시지에는 길게 붙이지 않습니다. 유사 작업 이력도 내부 판단용으로만 사용하고 Telegram에 출력하지 않습니다.
 
-- `design.yaml` 파일 자체와 DSL 요약은 Telegram 메시지에 붙이지 않습니다.
-- 파일 전송은 기본적으로 이미지, `.gds`, Lumerical project 파일만 보냅니다.
-- Lumerical project 파일은 solver에 따라 `.lms`, `.fsp`, `.ldev`, `.icp` 등을 허용합니다.
-- YAML/JSON/LSF/CSV는 작업 폴더에 보존됩니다.
-- mode profile 이미지는 waveguide 또는 coupler 구조 outline을 함께 오버레이합니다.
-- 자연어 작업은 `data/photonics/task_memory.jsonl`에 기록됩니다.
-- 유사 요청 기록은 내부 재사용 판단용으로만 보존하고 Telegram 메시지에는 표시하지 않습니다.
-- FDTD 계열 작업은 실행 전에 ETA와 조건을 보여주고 `yes` / `ㅇㅇ` 확인을 받은 뒤 실행합니다.
-- 자연어 요청이나 일부 구조화 명령에서 기본값/추론이 들어가면 먼저 확인을 요청합니다.
-- 확인 요청을 취소하려면 `no` 또는 `취소`라고 보내면 됩니다.
+## FDTD Policy
 
-DSL은 대략 아래 구조를 가집니다.
+FDTD smoke-test helper는 제거했습니다.
 
-```yaml
-version: 1
-intent:
-  component: "directional_coupler"
-  task: "simulate_and_layout"
-graph:
-  nodes:
-    -
-      id: "dc1"
-      type: "directional_coupler"
-  edges:
-    -
-      from: "in_top"
-      to: "dc1"
-      kind: "optical_link"
-simulation:
-  method: "eme"
-  sandbox_metric: "even_odd_supermode_delta_neff"
-```
+FDTD 요청은 이제 deterministic helper가 아니라 general Codex workflow로 처리합니다. 즉, component-specific FDTD project/code를 만들고, 실행이 무거운 경우 ETA와 조건 확인 후 진행합니다.
 
-`agent_pipeline.yaml` 은 아래 stage 결과를 저장합니다.
+## Local Setup
 
-```text
-Telegram Bot
-Intent Agent
-Spec Agent
-Code Writer Agent
-Code Reviewer Agent
-Sandbox Runner
-Result Evaluator Agent
-Debug / Refine Agent
-Telegram Report + Files
-```
-
-현재 구현은 stage마다 별도 LLM 프로세스를 띄우는 방식이 아니라, 같은 CLI 안에서 deterministic agent stage로 실행됩니다. 그래서 재현성과 속도는 유지하면서, 나중에 각 stage를 독립 에이전트로 분리할 수 있습니다.
-
-## 설정
-
-`.env.example` 를 `.env` 로 복사해서 사용합니다.
+`.env.example`을 `.env`로 복사해서 사용합니다.
 
 ```powershell
 Copy-Item .env.example .env
@@ -212,7 +216,7 @@ Copy-Item .env.example .env
 - `BRIDGE_WORKDIR`
 - `CODEX_CMD`
 
-포토닉 관련 선택 값:
+선택 값:
 
 - `LUMERICAL_PYTHON_API_DIR`
 - `PHOTONICS_OUTPUT_DIR`
@@ -224,56 +228,51 @@ Copy-Item .env.example .env
 - `PHOTONICS_DEFAULT_DC_GAP_NM`
 - `PHOTONICS_DEFAULT_DC_COUPLING_LENGTH_UM`
 - `PHOTONICS_DEFAULT_DC_ACCESS_LENGTH_UM`
+- `PHOTONICS_SIN_MATERIAL`
+- `PHOTONICS_DEFAULT_MMI_ROUTING_WIDTH_NM`
+- `PHOTONICS_DEFAULT_MMI_SIN_HEIGHT_NM`
+- `PHOTONICS_DEFAULT_MMI_BODY_WIDTH_UM`
+- `PHOTONICS_DEFAULT_MMI_BODY_LENGTH_UM`
+- `PHOTONICS_DEFAULT_MMI_TAPER_LENGTH_UM`
+- `PHOTONICS_DEFAULT_MMI_ACCESS_LENGTH_UM`
+- `PHOTONICS_DEFAULT_MMI_PORT_PITCH_UM`
 
-## 실행
+## Running The Bridge
 
 ```powershell
 .\run_bridge.ps1
 ```
 
-## 로컬 CLI 테스트
+현재 실행 상태 확인:
 
 ```powershell
-python .\photonics_agent.py env --json
+.\check_bridge.ps1
+```
+
+## Local CLI Checks
+
+```powershell
+python -B .\photonics_agent.py env --json
 ```
 
 ```powershell
-python .\photonics_agent.py mode --width-nm 500 --height-nm 220 --wavelength-nm 1550
+python -B .\photonics_agent.py mode --width-nm 500 --height-nm 220 --wavelength-nm 1550
 ```
 
 ```powershell
-python .\photonics_agent.py mode --width-nm 500 --height-nm 220 --sidewall-angle-deg 88 --wavelength-nm 1550
+python -B .\photonics_agent.py sweep --width-start-nm 400 --width-stop-nm 700 --width-step-nm 25 --height-nm 220 --wavelength-nm 1550
 ```
 
 ```powershell
-python .\photonics_agent.py sweep --width-start-nm 400 --width-stop-nm 700 --width-step-nm 25 --height-nm 220 --wavelength-nm 1550
+python -B .\photonics_agent.py dc --width-nm 500 --height-nm 220 --gap-nm 200 --coupling-length-um 20
 ```
 
 ```powershell
-python .\photonics_agent.py nl --request "기본적인 etch depth 220nm, sidewall angle 90도인 SOI waveguide의 mode profile 그려줘"
+python -B .\photonics_agent.py dc_sweep --parameter gap_nm --start 100 --stop 300 --step 50 --width-nm 500 --height-nm 220
 ```
 
 ```powershell
-python .\photonics_agent.py dc --width-nm 500 --height-nm 220 --gap-nm 200 --coupling-length-um 20
+python -B .\photonics_agent.py mmi --ports-in 2 --ports-out 2 --routing-width-nm 1500 --height-nm 400 --core-material "Si3N4 (Silicon Nitride) - Luke"
 ```
 
-```powershell
-python .\photonics_agent.py dc_sweep --parameter gap_nm --start 100 --stop 300 --step 50 --width-nm 500 --height-nm 220
-```
-
-```powershell
-python .\photonics_agent.py dc_sweep --parameter coupling_length_um --start 5 --stop 60 --step 5 --width-nm 500 --height-nm 220 --gap-nm 200
-```
-
-```powershell
-python .\photonics_agent.py fdtd_test --width-nm 500 --height-nm 220 --length-um 2
-```
-
-## 현재 범위
-
-- 지금은 `MODE` 기반 waveguide, sweep, directional coupler supermode 해석이 중심입니다.
-- directional coupler는 EME `.lsf` 를 생성하고, 자동 수치 검증은 FDE even/odd supermode의 `delta_neff` 로 수행합니다.
-- directional coupler supermode는 mode1/mode2의 좌우 parity correlation으로 even/odd 여부를 같이 검증합니다.
-- FDTD 테스트는 빠른 smoke test용으로 project 생성과 `.fsp` 저장까지만 수행하며 time-domain `run`은 하지 않습니다.
-- `FDTD`, `INTERCONNECT`, MMI / ring / grating 전용 템플릿은 아직 미구현입니다.
-- 더 복잡한 fabrication stack, 재료 DB 매핑, 공정 PDK 룰은 다음 단계에서 붙이면 됩니다.
+FDTD helper command는 없습니다. FDTD 관련 요청은 Telegram natural language 또는 Codex general photonics workflow를 통해 처리합니다.
