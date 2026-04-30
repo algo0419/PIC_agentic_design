@@ -4,8 +4,8 @@ Telegram 메시지를 받아 이 PC에서 Codex와 Lumerical API를 사용해 ph
 
 목표는 두 가지입니다.
 
-- 반복적이고 검증된 작업은 deterministic helper로 빠르게 처리합니다.
-- helper에 없는 component는 Codex multi-agent workflow로 DSL, Lumerical code, GDS, project file, preview, debug/refine까지 수행합니다.
+- 자연어 photonics 요청은 Codex multi-agent workflow가 먼저 의미를 판단합니다.
+- deterministic helper는 직접 명령(`/mode`, `/dc`, `/mmi` 등) 또는 agent가 참고하는 검증된 도구로 사용합니다.
 
 ## Current Architecture
 
@@ -21,11 +21,17 @@ Telegram Bot
   -> Telegram Report + Files
 ```
 
-현재 구현은 두 경로로 라우팅합니다.
+현재 구현은 자연어 경로와 명시적 helper 경로를 분리합니다.
 
-### Known Helper Path
+### Natural-Language Agent Path
 
-아래 작업은 `photonics_agent.py` deterministic helper가 직접 처리합니다.
+Telegram 자연어 photonics 요청은 기본적으로 `codex_photonics` 경로로 들어갑니다. Component 이름을 단순 keyword로 매핑하지 않고, Intent/Spec 단계에서 사용자가 실제로 요구한 것이 layout인지, project 생성인지, propagation analysis인지, sweep/optimization인지 먼저 판단합니다.
+
+General path는 자연어를 바로 Lumerical code로 만들지 않고, 먼저 YAML DSL을 만들도록 프롬프트되어 있습니다. Component는 node, optical link / excitation / monitor / sweep은 edge로 표현합니다.
+
+### Helper Reference Path
+
+아래 작업은 `photonics_agent.py` deterministic helper가 직접 처리할 수 있으며, 자연어 agent도 필요할 때 reference implementation으로 사용할 수 있습니다. Helper는 task 이해를 대체하지 않습니다.
 
 - MODE 기반 strip / rib waveguide mode solve
 - waveguide width sweep
@@ -36,21 +42,20 @@ Telegram Bot
 - 2x2 MMI 기본 layout / GDS / EME project skeleton 생성
 - YAML DSL (`design.yaml`) 및 pipeline trace (`agent_pipeline.yaml`) 생성
 
-### General Component Path
+직접 helper를 쓰고 싶으면 `/mode`, `/sweep`, `/dc`, `/dc_sweep`, `/mmi` 같은 structured command를 사용합니다.
 
-아래처럼 helper에 없는 component나 더 추상적인 요청은 `codex_photonics` 경로로 보냅니다.
+### Agent Role Guide
 
-- ring resonator
-- grating coupler
-- MZI / Mach-Zehnder
-- AWG
-- splitter / Y-branch
-- photonic crystal / cavity
-- taper / bend
-- modulator
-- component-specific FDTD / EME / MODE workflow
+내부 prompt는 각 agent에 아래 역할을 명시합니다.
 
-General path는 자연어를 바로 Lumerical code로 만들지 않고, 먼저 YAML DSL을 만들도록 프롬프트되어 있습니다. Component는 node, optical link / excitation / monitor는 edge로 표현합니다.
+- Intent Agent: component keyword가 아니라 목적, solver, target metric, output, missing/risky parameter를 판단합니다.
+- Spec Agent: user value를 보존하고 node/edge 기반 YAML DSL을 만듭니다.
+- Material Agent: Lumerical material DB 이름을 정규화하고, 불명확한 material은 확인하거나 Lumerical DB에서 검증합니다.
+- Code Writer Agent: Lumerical Python/LSF/GDS를 component-specific하게 작성합니다. Helper는 참고 코드로만 사용합니다.
+- Code Reviewer Agent: geometry-only skeleton이 propagation/sweep/optimization 요청을 만족하는 척하지 못하게 검토합니다.
+- Sandbox Runner: 가벼운 project/code 검증을 수행하고 heavy run은 ETA/승인 후 실행합니다.
+- Result Evaluator Agent: requested metric 달성 여부를 판단합니다.
+- Debug / Refine Agent: Lumerical stdout/stderr를 다시 입력으로 사용해 수정 후 1회 재시도합니다.
 
 ## Debug And Research Policy
 
@@ -59,6 +64,7 @@ General path는 자연어를 바로 Lumerical code로 만들지 않고, 먼저 Y
 - local helper가 모르는 component/API/property는 공식 Ansys/Lumerical 문서를 우선 확인하도록 프롬프트되어 있습니다.
 - 필요하면 공식 문서 스니펫을 `data/docs/lumerical/` 아래에 source URL과 함께 캐시할 수 있습니다.
 - 3D FDTD, 긴 EME sweep, optimization loop, 큰 parameter sweep은 실행 전에 ETA와 조건을 보여주고 사용자 확인을 받아야 합니다.
+- Default material DB 요약은 `docs/lumerical/default_material_database.yaml`에 정리되어 있고, 코드의 common alias resolution은 `lumerical_materials.py`가 담당합니다.
 
 주요 공식 문서:
 

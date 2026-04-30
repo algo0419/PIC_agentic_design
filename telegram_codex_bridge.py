@@ -79,7 +79,7 @@ def bridge_help_text() -> str:
             "50대 50 directional coupler 기본 설계하고 GDS랑 시뮬레이션 파일 보내줘",
             "grating coupler FDTD project 만들어줘. 실행 전에 ETA 확인해줘",
             "",
-            "일반 자연어 요청도 가능하지만, Lumerical 작업은 위 명령 형식이 가장 안정적입니다.",
+            "일반 자연어 Lumerical 요청은 multi-agent 경로에서 의미를 먼저 판단합니다. 위 명령은 deterministic helper를 직접 호출하고 싶을 때 사용하세요.",
         ]
     )
 
@@ -109,6 +109,8 @@ def looks_like_photonics_request(text: str) -> bool:
         "coupling length",
         "gds",
         "fdtd",
+        "eme",
+        "propagation",
         "fsp",
         "mmi",
         "multimode interferometer",
@@ -142,6 +144,8 @@ def looks_like_photonics_request(text: str) -> bool:
         "결합기",
         "실리콘 포토닉스",
         "광도파로",
+        "전파",
+        "스윕",
     ]
     return any(keyword in lowered for keyword in keywords)
 
@@ -268,6 +272,7 @@ class TaskRunner:
         self.python_cmd = sys.executable
         self.tasks: queue.Queue[dict] = queue.Queue()
         self.pending_confirmations: dict[str, dict] = {}
+        self.recent_chat_context: dict[str, list[dict[str, str]]] = {}
         self.worker = threading.Thread(target=self._worker_loop, daemon=True)
 
     def start(self) -> None:
@@ -348,7 +353,10 @@ class TaskRunner:
         no_values = {"no", "n", "cancel", "stop", "아니", "아니오", "ㄴ", "취소", "중단", "멈춰"}
 
         pending = self.pending_confirmations.get(chat_id)
-        if normalized not in yes_values and normalized not in no_values:
+        first_token = normalized.split()[0]
+        confirmed = normalized in yes_values or (pending is not None and first_token in yes_values)
+        denied = normalized in no_values or (pending is not None and first_token in no_values)
+        if not confirmed and not denied:
             return False
 
         if pending is None:
@@ -356,7 +364,7 @@ class TaskRunner:
             return True
 
         self.pending_confirmations.pop(chat_id, None)
-        if normalized in no_values:
+        if denied:
             self.telegram.send_message(chat_id, "취소했습니다. 조건을 바꿔서 다시 보내주시면 됩니다.")
             return True
 
@@ -532,7 +540,9 @@ class TaskRunner:
                     attachment_path = (self.workdir / attachment_path).resolve()
                 if attachment_path.exists() and attachment_path.is_file():
                     self._safe_send_document(chat_id, attachment_path)
-            self._safe_send(chat_id, (reply_text or "작업이 끝났습니다.")[:3000])
+            reply = reply_text or "작업이 끝났습니다."
+            self._remember_chat_context(task, reply, attachments_to_send)
+            self._safe_send(chat_id, reply[:3000])
             return
 
         tail = (result["stderr"] or result["stdout"])[-3000:].strip()
@@ -563,6 +573,8 @@ class TaskRunner:
             env=os.environ.copy(),
             input=prompt,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=None,
         )
@@ -600,6 +612,8 @@ class TaskRunner:
             cwd=self.workdir,
             env=os.environ.copy(),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=None,
         )
@@ -628,8 +642,11 @@ class TaskRunner:
             return
 
         payload = json.loads(stdout.strip() or "{}")
-        self._safe_send(chat_id, str(payload.get("message", "포토닉 작업을 완료했습니다."))[:3000])
-        for attachment in payload.get("telegram_attachments", payload.get("attachments", [])):
+        message = str(payload.get("message", "포토닉 작업을 완료했습니다."))
+        attachments = payload.get("telegram_attachments", payload.get("attachments", []))
+        self._remember_chat_context(task, message, [str(item) for item in attachments])
+        self._safe_send(chat_id, message[:3000])
+        for attachment in attachments:
             attachment_path = Path(attachment)
             if not attachment_path.is_absolute():
                 attachment_path = (self.workdir / attachment_path).resolve()
@@ -670,11 +687,38 @@ class TaskRunner:
         except Exception:  # noqa: BLE001
             pass
 
+    def _remember_chat_context(self, task: dict, reply_text: str, attachments: list[str]) -> None:
+        route = task.get("route", "")
+        request = task.get("text", "")
+        if route != "codex_photonics" and not route.startswith("photonics_") and not looks_like_photonics_request(request):
+            return
+        chat_id = str(task["chat_id"])
+        record = {
+            "route": route,
+            "request": request[:1200],
+            "reply": reply_text[:1200],
+            "attachments": ", ".join(attachments[:4])[:1200],
+        }
+        records = self.recent_chat_context.setdefault(chat_id, [])
+        records.append(record)
+        del records[:-5]
+
+    def _recent_context_lines(self, chat_id: str) -> list[str]:
+        records = self.recent_chat_context.get(chat_id, [])[-3:]
+        if not records:
+            return ["- none"]
+        lines: list[str] = []
+        for index, record in enumerate(records, start=1):
+            lines.append(f"- previous task {index} route: {record.get('route', '')}")
+            lines.append(f"  request: {record.get('request', '')}")
+            lines.append(f"  result: {record.get('reply', '')}")
+            if record.get("attachments"):
+                lines.append(f"  attachments: {record['attachments']}")
+        return lines
+
     def _resolve_route(self, text: str) -> tuple[str, list[str]]:
         if not text.startswith("/"):
             if looks_like_photonics_request(text):
-                if self._should_use_photonics_helper(text):
-                    return "photonics_nl", ["nl", "--request", text]
                 return "codex_photonics", []
             return "codex", []
 
@@ -701,56 +745,6 @@ class TaskRunner:
             return "photonics_mmi", self._mmi_cli_args(params)
 
         raise ConfigError("지원하지 않는 명령입니다.\n\n" + bridge_help_text())
-
-    def _should_use_photonics_helper(self, text: str) -> bool:
-        lowered = text.lower()
-        explicit_helper_keywords = [
-            "directional coupler",
-            "directional-coupler",
-            "50:50",
-            "50대 50",
-            "coupling length",
-            "mmi",
-            "multimode interferometer",
-        ]
-        waveguide_helper_keywords = [
-            "waveguide",
-            "wg ",
-            " wg",
-            "soi",
-            "mode profile",
-            "neff",
-            "sidewall",
-            "etch",
-            "slab",
-            "rib",
-            "strip",
-            "width sweep",
-        ]
-        generic_component_keywords = [
-            "ring",
-            "resonator",
-            "grating",
-            "mzi",
-            "mach zehnder",
-            "mach-zehnder",
-            "awg",
-            "arrayed waveguide",
-            "splitter",
-            "y-branch",
-            "y branch",
-            "photonic crystal",
-            "cavity",
-            "modulator",
-            "taper",
-            "bend",
-        ]
-
-        if any(keyword in lowered for keyword in explicit_helper_keywords):
-            return True
-        if any(keyword in lowered for keyword in generic_component_keywords):
-            return False
-        return any(keyword in lowered for keyword in waveguide_helper_keywords)
 
     def _parse_params(self, tokens: list[str]) -> dict[str, str]:
         params: dict[str, str] = {}
@@ -1094,28 +1088,31 @@ class TaskRunner:
     def _build_prompt(self, task: dict) -> str:
         attachment_paths = self._task_attachment_paths(task)
         attachment_lines = [f"- {path}" for path in attachment_paths] or ["- none"]
+        recent_context_lines = self._recent_context_lines(str(task["chat_id"]))
         is_photonics_agent_task = task.get("route") == "codex_photonics" or looks_like_photonics_request(task.get("text", ""))
         photonics_workflow_lines: list[str] = []
         if is_photonics_agent_task:
             photonics_workflow_lines = [
                 "",
-                "For this photonic design task, use the following multi-agent workflow internally:",
-                "1. Intent Agent: identify component type, target function, requested solver, outputs, and missing/risky parameters.",
-                "2. Spec Agent: create a YAML DSL in `data/photonics/general-<timestamp>/design.yaml` with components as nodes and optical links/excitations/monitors as edges.",
-                "3. Code Writer Agent: generate reproducible Lumerical Python or LSF code plus a preview image and GDS when layout is requested.",
-                "4. Code Reviewer Agent: check units, material names, coordinate axes, port ordering, simulation dimensionality, and whether the job is too heavy.",
-                "5. Sandbox Runner: run only lightweight checks or project creation. Do not run heavy 3D FDTD, long EME sweeps, optimizations, or large parameter sweeps unless the user explicitly approved them.",
-                "6. Result Evaluator Agent: report concise Korean results and attach only useful deliverables.",
-                "7. Debug / Refine Agent: if execution fails, leave reproducible scripts and explain the blocker briefly.",
+                "For this photonic design task, use the following multi-agent workflow internally. These are roles you must simulate explicitly while working, not text to print to Telegram.",
+                "1. Intent Agent: you are a photonic-design intake expert. Determine the user's actual objective, component behavior, target metric, requested solver, outputs, constraints, and whether the user is asking for layout only, project creation, propagation analysis, sweep, or optimization. Do not route by component keywords alone.",
+                "2. Spec Agent: you are a structured-spec expert. Create a YAML DSL in `data/photonics/general-<timestamp>/design.yaml` with components as nodes and optical links/excitations/monitors/sweeps as edges. Preserve user-supplied values exactly. Mark missing parameters as `needs_user_confirmation` when they materially change the design.",
+                "3. Material Agent: you are a Lumerical material-database expert. Use `docs/lumerical/default_material_database.yaml` and `lumerical_materials.py` for material-name normalization. Use exact installed Lumerical material names when known; if material choice is ambiguous or absent from the registry, ask or verify with Lumerical before a production run.",
+                "4. Code Writer Agent: you are a Lumerical API/LSF/GDS implementation expert. Generate component-specific Python or LSF, preview images, GDS, and project files. Existing helper commands are reference implementations only; do not blindly substitute numbers into a helper if the requested operation is different.",
+                "5. Code Reviewer Agent: you are a photonic-simulation QA expert. Check units, coordinate axes, solver choice, ports, monitors, material names, boundary conditions, mesh settings, sweep ranges, and whether the code actually performs the requested analysis. Reject a geometry-only skeleton when the user asked for propagation, sweep, or optimization.",
+                "6. Sandbox Runner: you are a safe execution expert. Run syntax checks, lightweight project creation, and short solves when feasible. Do not run heavy 3D FDTD, long EME sweeps, optimizations, or large parameter sweeps unless the user explicitly approved the estimated runtime and scope.",
+                "7. Result Evaluator Agent: you are a photonic-results expert. Compare results to the requested target, such as top/bottom 50/50 split, neff, coupling length, loss, or spectrum. If the target is not achieved, state the next refinement instead of pretending success.",
+                "8. Debug / Refine Agent: you are a Lumerical error-debugging expert. Feed stdout/stderr and Lumerical errors back into the generated code, fix the root cause, retry once when safe, and leave reproducible scripts if live execution is blocked.",
                 "",
                 "Important photonics policy:",
+                "- Natural-language photonics requests are routed here for semantic judgment. Component names such as MMI, ring, or grating may suggest reference code, but they do not define the task by themselves.",
+                "- Use deterministic helper commands only when the interpreted task truly matches their capability; otherwise write or adapt a component-specific workflow.",
                 "- Do not collapse unknown components into a waveguide fallback.",
                 "- If a missing parameter materially changes the design, ask a concise clarification question instead of guessing.",
                 "- If a default is low-risk, use it but keep units explicit in the result.",
                 "- If the component or Lumerical API details are not covered by local helper commands, research official Ansys/Lumerical docs before generating code.",
                 "- Prefer official sources: Ansys Optics Python API overview, Lumerical Python API Reference, Lumerical scripting command list, and Ansys Developer Lumerical pages.",
                 "- If documentation is downloaded, store it under `data/docs/lumerical/` with source URL metadata.",
-                "- Prefer deterministic helper commands for supported tasks; otherwise write the component-specific Lumerical/GDS workflow yourself.",
                 "- Keep generated artifacts under `data/photonics/general-<timestamp>/`.",
                 "- Telegram attachments should usually be preview images, `.gds`, and the relevant Lumerical project file (`.lms`, `.fsp`, `.ldev`, `.icp`). Attach scripts only when no project file could be created.",
                 "- Do not include long DSL summaries or similar-task history in the Telegram message.",
@@ -1125,7 +1122,7 @@ class TaskRunner:
             [
                 "You are Junhyung's private photonic design assistant running on his computer.",
                 "Specialize in Lumerical API workflows, silicon photonics, waveguides, MMIs, rings, gratings, and parameter sweeps.",
-                "Prefer using the local helper CLI `python photonics_agent.py ...` for MODE-based tasks before writing raw lumapi code.",
+                "Interpret the user's task first. Use the local helper CLI `python photonics_agent.py ...` as a tool or reference only after deciding it matches the requested analysis.",
                 *photonics_workflow_lines,
                 "Reply in natural, concise Korean.",
                 "Use polite Korean consistently.",
@@ -1136,7 +1133,10 @@ class TaskRunner:
                 "If a live Lumerical solve fails, still leave behind reproducible Python or LSF files and explain what is ready.",
                 f"Current workspace: {self.workdir}",
                 "If you create or modify files, do so in this workspace.",
-                "Useful local helper commands include `python photonics_agent.py env`, `python photonics_agent.py mode`, `python photonics_agent.py sweep`, `python photonics_agent.py dc`, `python photonics_agent.py dc_sweep`, and `python photonics_agent.py mmi`.",
+                "Useful local helper commands include `python photonics_agent.py env`, `python photonics_agent.py mode`, `python photonics_agent.py sweep`, `python photonics_agent.py dc`, `python photonics_agent.py dc_sweep`, and `python photonics_agent.py mmi`; treat them as validated examples, not as a substitute for task understanding.",
+                "Recent chat photonics context is provided only to resolve follow-up requests like 'continue' or 'run propagation too'. Do not print this context back to Telegram.",
+                "Recent chat photonics context:",
+                *recent_context_lines,
                 "After finishing, reply like a compact engineering assistant.",
                 "Keep the reply short and natural.",
                 "Do not use sections or bullet lists unless truly needed.",

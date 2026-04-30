@@ -14,6 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from lumerical_materials import DEFAULT_SIN_MATERIAL as MATERIAL_DB_DEFAULT_SIN
+from lumerical_materials import resolve_material_from_text
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = Path(os.environ.get("PHOTONICS_OUTPUT_DIR", "data/photonics"))
@@ -35,7 +38,7 @@ DEFAULT_DC_GAP_SWEEP_STEP_NM = float(os.environ.get("PHOTONICS_DEFAULT_DC_GAP_SW
 DEFAULT_DC_LENGTH_SWEEP_START_UM = float(os.environ.get("PHOTONICS_DEFAULT_DC_LENGTH_SWEEP_START_UM", "5"))
 DEFAULT_DC_LENGTH_SWEEP_STOP_UM = float(os.environ.get("PHOTONICS_DEFAULT_DC_LENGTH_SWEEP_STOP_UM", "60"))
 DEFAULT_DC_LENGTH_SWEEP_STEP_UM = float(os.environ.get("PHOTONICS_DEFAULT_DC_LENGTH_SWEEP_STEP_UM", "5"))
-DEFAULT_SIN_MATERIAL = os.environ.get("PHOTONICS_SIN_MATERIAL", "Si3N4 (Silicon Nitride) - Luke")
+DEFAULT_SIN_MATERIAL = os.environ.get("PHOTONICS_SIN_MATERIAL", MATERIAL_DB_DEFAULT_SIN)
 DEFAULT_MMI_ROUTING_WIDTH_NM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_ROUTING_WIDTH_NM", "1500"))
 DEFAULT_MMI_SIN_HEIGHT_NM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_SIN_HEIGHT_NM", "400"))
 DEFAULT_MMI_BODY_WIDTH_UM = float(os.environ.get("PHOTONICS_DEFAULT_MMI_BODY_WIDTH_UM", "6"))
@@ -794,11 +797,7 @@ def parse_mmi_port_counts(text: str) -> tuple[int, int]:
 
 
 def infer_core_material(text: str, default_material: str) -> str:
-    if re.search(r"(?<![a-z0-9])(?:sin|si3n4|silicon\s+nitride|nitride)(?![a-z0-9])", text):
-        return DEFAULT_SIN_MATERIAL
-    if re.search(r"\b(?:si|silicon|soi)\b", text):
-        return "Si (Silicon) - Palik"
-    return default_material
+    return resolve_material_from_text(text, default_material) or default_material
 
 
 def detect_unsupported_component(text: str) -> str | None:
@@ -862,12 +861,28 @@ def parse_natural_language_request(request: str) -> ParsedNaturalLanguageRequest
             r"top\s*silicon\s*height",
             r"silicon\s*thickness",
             r"si\s*thickness",
+            r"sin\s*thickness",
+            r"sin\s*height",
+            r"si3n4\s*thickness",
+            r"si3n4\s*height",
+            r"silicon\s*nitride\s*thickness",
+            r"silicon\s*nitride\s*height",
+            r"nitride\s*thickness",
+            r"nitride\s*height",
             r"waveguide\s*thickness",
             r"waveguide\s*height",
             r"wg\s*thickness",
             r"wg\s*height",
             r"core\s*thickness",
             r"core\s*height",
+            r"sin\s*두께",
+            r"sin\s*높이",
+            r"si3n4\s*두께",
+            r"si3n4\s*높이",
+            r"질화규소\s*두께",
+            r"질화규소\s*높이",
+            r"실리콘\s*나이트라이드\s*두께",
+            r"실리콘\s*나이트라이드\s*높이",
             r"상부\s*실리콘\s*두께",
             r"실리콘\s*두께",
             r"웨이브가이드\s*두께",

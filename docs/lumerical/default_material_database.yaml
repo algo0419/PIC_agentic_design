@@ -1,0 +1,93 @@
+source:
+  title: "Ansys Optics Help Center - Material Database in FDTD and MODE"
+  basis: "User-supplied excerpt from the default optical material database article."
+  note: "Exact selectable names can vary by installed Lumerical version; generated scripts should verify material availability when possible."
+
+categories:
+  palik:
+    reference: "Handbook of Optical Constants of Solids I-III by E. Palik"
+    materials:
+      - "Ag (Silver)"
+      - "Al (Aluminum)"
+      - "Al2O3 (Aluminum Oxide)"
+      - "Au (Gold)"
+      - "Cr (Chromium)"
+      - "Cu (Copper)"
+      - "Fe (Iron)"
+      - "GaAs (Gallium Arsenide)"
+      - "Ge (Germanium)"
+      - "H2O (Water)"
+      - "In (Indium)"
+      - "InAs (Indium Arsenide)"
+      - "InP (Indium Phosphide)"
+      - "Ni (Nickel)"
+      - "Pd (Palladium)"
+      - "Pt (Platinum)"
+      - "Rh (Rhodium)"
+      - "Si (Silicon)"
+      - "SiO2 (Glass)"
+      - "Sn (Tin)"
+      - "Ti (Titanium)"
+      - "TiN (Titanium Nitride)"
+      - "W (Tungsten)"
+
+  crc:
+    reference: "CRC Handbook of Chemistry & Physics"
+    materials:
+      - "Ag (Silver)"
+      - "Al (Aluminum)"
+      - "Au (Gold)"
+      - "Cr (Chromium)"
+      - "Cu (Copper)"
+      - "Fe (Iron)"
+      - "Ge (Germanium)"
+      - "Ni (Nickel)"
+      - "Ta (Tantalum)"
+      - "Ti (Titanium)"
+      - "V (Vanadium)"
+      - "W (Tungsten)"
+
+  johnson_christy:
+    reference: "Johnson and Christy, Optical Constants of Noble Metals, Phys. Rev. B 6, 4370 (1972)"
+    materials:
+      - "Ag (Silver)"
+      - "Au (Gold)"
+
+  liquid_crystal_li:
+    reference: "Li, J., Refractive Indices Of Liquid Crystals And Their Applications In Display And Photonic Devices, University of Central Florida (2005)"
+    materials:
+      - "5CB - Li"
+      - "5PCH - Li"
+      - "6241-000 - Li"
+      - "E44 - Li"
+      - "E7 - Li"
+      - "MLC-6608 - Li"
+      - "MLC-9200-000 - Li"
+      - "MLC-9200-100 - Li"
+      - "TL-216 - Li"
+
+  other:
+    materials:
+      - name: "Etch"
+      - name: "PEC (Perfect Electrical Conductor)"
+      - name: "C (graphene) - Falkovsky (mid-IR)"
+      - name: "Graphene"
+      - name: "Si3N4 (Silicon Nitride) - Phillip"
+        reference: "H. R. Philipp, Optical properties of silicon nitride, J. Electrochim. Soc. 120, 295-300 (1973)"
+      - name: "Si3N4 (Silicon Nitride) - Kischkat"
+        reference: "J. Kischkat et al., Appl. Opt. 51, 6789-6798 (2012)"
+      - name: "Si3N4 (Silicon Nitride) - Luke"
+        reference: "K. Luke et al., Broadband mid-infrared frequency comb generation in a Si3N4 microresonator, Opt. Lett. 40, 4823-4826 (2015)"
+      - name: "TiO2 (Titanium Dioxide) - Kischkat"
+        reference: "J. Kischkat et al., Appl. Opt. 51, 6789-6798 (2012)"
+      - name: "TiO2 (Titanium Dioxide) - Sarkar"
+        reference: "S. Sarkar et al., ACS Appl. Mater. Interfaces 11, 13752-13760 (2019)"
+      - name: "TiO2 (Titanium Dioxide) - Siefke"
+        reference: "T. Siefke et al., Adv. Opt. Mater. 4, 1780-1786 (2016)"
+      - name: "TiO2 (Titanium Dioxide) - Devore"
+        reference: "J. R. Devore, J. Opt. Soc. Am. 41, 416-419 (1951)"
+
+agent_usage:
+  - "Use this registry for material-name normalization only, not for component/task routing."
+  - "Prefer exact Lumerical database names in generated scripts."
+  - "If a requested material is absent or ambiguous, ask the user or query the installed Lumerical material database before running a production solve."
