@@ -2,6 +2,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
@@ -527,7 +528,7 @@ class TaskRunner:
             transcript_file=LOGS_DIR / f"{task_id}.stdout.log",
         )
 
-        if result["returncode"] != 0 and task.get("route") == "codex_photonics":
+        if result["returncode"] != 0 and task.get("route") == "codex_photonics" and not self._is_codex_usage_limit(result):
             debug_prompt = self._build_debug_refine_prompt(task, result)
             debug_prompt_file = TASKS_DIR / f"{task_id}.debug_refine.prompt.txt"
             debug_prompt_file.write_text(debug_prompt, encoding="utf-8")
@@ -552,11 +553,55 @@ class TaskRunner:
             self._safe_send(chat_id, reply[:3000])
             return
 
-        tail = (result["stderr"] or result["stdout"])[-3000:].strip()
+        self._safe_send(chat_id, self._codex_failure_reply(result))
+
+    def _combined_process_output(self, result: dict) -> str:
+        return "\n".join(part for part in [result.get("stderr") or "", result.get("stdout") or ""] if part)
+
+    def _is_codex_usage_limit(self, result: dict) -> bool:
+        lowered = self._combined_process_output(result).lower()
+        return any(
+            marker in lowered
+            for marker in [
+                "you've hit your usage limit",
+                "you have hit your usage limit",
+                "usage limit",
+                "purchase more credits",
+                "codex/settings/usage",
+            ]
+        )
+
+    def _extract_usage_limit_retry_time(self, text: str) -> str | None:
+        match = re.search(r"try again at\s+([^.\n\r]+(?:am|pm)?)", text, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return re.sub(r"\s+", " ", match.group(1)).strip()
+
+    def _looks_like_html_challenge(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(marker in lowered for marker in ["<html", "<script", "cloudflare", "__cf_chl", "challenge-platform"])
+
+    def _codex_failure_reply(self, result: dict) -> str:
+        combined = self._combined_process_output(result)
+        if self._is_codex_usage_limit(result):
+            retry_time = self._extract_usage_limit_retry_time(combined)
+            reply = "Codex 사용량 한도에 도달해서 작업을 실행하지 못했습니다."
+            if retry_time:
+                reply += f"\n\n재시도 가능 시각(원문 기준): {retry_time}"
+            reply += "\n\n크레딧을 충전하거나 제한이 풀린 뒤 다시 요청해 주세요."
+            return reply
+
+        if self._looks_like_html_challenge(combined):
+            return (
+                "Codex 서버가 HTML/Cloudflare challenge 응답을 반환해서 작업을 실행하지 못했습니다.\n\n"
+                "raw HTML은 숨겼습니다. 잠시 후 다시 시도하거나 Codex 로그인/네트워크 상태를 확인해 주세요."
+            )
+
+        tail = combined[-2000:].strip()
         reply = "작업을 처리하던 중 문제가 생겼습니다."
         if tail:
             reply += f"\n\n{tail}"
-        self._safe_send(chat_id, reply)
+        return reply
 
     def _run_codex_exec(self, prompt: str, output_file: Path, transcript_file: Path) -> dict:
         command = [
