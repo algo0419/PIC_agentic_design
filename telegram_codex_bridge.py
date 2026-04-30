@@ -63,6 +63,13 @@ def parse_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    return env
+
+
 def bridge_help_text() -> str:
     return "\n".join(
         [
@@ -570,7 +577,7 @@ class TaskRunner:
         completed = subprocess.run(
             command,
             cwd=self.workdir,
-            env=os.environ.copy(),
+            env=subprocess_env(),
             input=prompt,
             text=True,
             encoding="utf-8",
@@ -605,12 +612,12 @@ class TaskRunner:
         chat_id = task["chat_id"]
         transcript_file = LOGS_DIR / f"{task_id}.stdout.log"
 
-        command = [self.python_cmd, str(PHOTONICS_CLI), *task.get("cli_args", []), "--json"]
+        command = [self.python_cmd, "-B", str(PHOTONICS_CLI), *task.get("cli_args", []), "--json"]
         command_log = " ".join(f'"{part}"' if " " in part else part for part in command)
         completed = subprocess.run(
             command,
             cwd=self.workdir,
-            env=os.environ.copy(),
+            env=subprocess_env(),
             text=True,
             encoding="utf-8",
             errors="replace",

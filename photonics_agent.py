@@ -17,6 +17,11 @@ from typing import Any
 from lumerical_materials import DEFAULT_SIN_MATERIAL as MATERIAL_DB_DEFAULT_SIN
 from lumerical_materials import resolve_material_from_text
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = Path(os.environ.get("PHOTONICS_OUTPUT_DIR", "data/photonics"))
